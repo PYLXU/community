@@ -49,9 +49,16 @@ namespace Ink_Canvas.Ink.WetInk
 
             // AddHandler with handledEventsToo=true：InkPresenter 会把 Stylus/Touch 事件
             // 标记为 Handled 让内置 InkCanvas 自己画——桥仍需接收以驱动引擎新墨迹路径。
-            _source.AddHandler(Stylus.StylusDownEvent, new RoutedEventHandler(OnStylusDownRouted), handledEventsToo: true);
-            _source.AddHandler(Stylus.StylusMoveEvent, new RoutedEventHandler(OnStylusMoveRouted), handledEventsToo: true);
-            _source.AddHandler(Stylus.StylusUpEvent, new RoutedEventHandler(OnStylusUpRouted), handledEventsToo: true);
+            // InkPresenter 在冒泡阶段会标记 e.Handled=true。handledEventsToo=true 理论应能收到，
+            // 但实际在某些 WPF 版本/手写笔栈下 routed event 在 Handled=true 之后不再派发
+            // 给同阶段订阅。需要同时订阅 Preview 阶段（隧道）才能稳定拿到。
+            _source.AddHandler(Stylus.PreviewStylusDownEvent, new RoutedEventHandler(OnStylusDownPreview), handledEventsToo: true);
+            _source.AddHandler(Stylus.PreviewStylusMoveEvent, new RoutedEventHandler(OnStylusMovePreview), handledEventsToo: true);
+            _source.AddHandler(Stylus.PreviewStylusUpEvent, new RoutedEventHandler(OnStylusUpPreview), handledEventsToo: true);
+            // Touch 的 Preview 事件键注册在 UIElement.Touch*Event 上而非 Touch.*Event。
+            _source.AddHandler(UIElement.PreviewTouchDownEvent, new EventHandler<TouchEventArgs>(OnTouchDownPreview), handledEventsToo: true);
+            _source.AddHandler(UIElement.PreviewTouchMoveEvent, new EventHandler<TouchEventArgs>(OnTouchMovePreview), handledEventsToo: true);
+            _source.AddHandler(UIElement.PreviewTouchUpEvent, new EventHandler<TouchEventArgs>(OnTouchUpPreview), handledEventsToo: true);
             _source.AddHandler(Stylus.StylusSystemGestureEvent, new RoutedEventHandler(OnStylusSystemGestureRouted));
             _source.AddHandler(UIElement.TouchDownEvent, new EventHandler<TouchEventArgs>(OnTouchDown), handledEventsToo: true);
             _source.AddHandler(UIElement.TouchMoveEvent, new EventHandler<TouchEventArgs>(OnTouchMove), handledEventsToo: true);
@@ -64,13 +71,53 @@ namespace Ink_Canvas.Ink.WetInk
                 return;
             _wired = false;
 
-            _source.RemoveHandler(Stylus.StylusDownEvent, new RoutedEventHandler(OnStylusDownRouted));
-            _source.RemoveHandler(Stylus.StylusMoveEvent, new RoutedEventHandler(OnStylusMoveRouted));
-            _source.RemoveHandler(Stylus.StylusUpEvent, new RoutedEventHandler(OnStylusUpRouted));
+            _source.RemoveHandler(Stylus.PreviewStylusDownEvent, new RoutedEventHandler(OnStylusDownPreview));
+            _source.RemoveHandler(Stylus.PreviewStylusMoveEvent, new RoutedEventHandler(OnStylusMovePreview));
+            _source.RemoveHandler(Stylus.PreviewStylusUpEvent, new RoutedEventHandler(OnStylusUpPreview));
+            _source.RemoveHandler(Stylus.PreviewStylusDownEvent, new RoutedEventHandler(OnStylusDownPreview));
+            _source.RemoveHandler(Stylus.PreviewStylusMoveEvent, new RoutedEventHandler(OnStylusMovePreview));
+            _source.RemoveHandler(Stylus.PreviewStylusUpEvent, new RoutedEventHandler(OnStylusUpPreview));
+            _source.RemoveHandler(UIElement.PreviewTouchDownEvent, new EventHandler<TouchEventArgs>(OnTouchDownPreview));
+            _source.RemoveHandler(UIElement.PreviewTouchMoveEvent, new EventHandler<TouchEventArgs>(OnTouchMovePreview));
+            _source.RemoveHandler(UIElement.PreviewTouchUpEvent, new EventHandler<TouchEventArgs>(OnTouchUpPreview));
             _source.RemoveHandler(Stylus.StylusSystemGestureEvent, new RoutedEventHandler(OnStylusSystemGestureRouted));
             _source.RemoveHandler(UIElement.TouchDownEvent, new EventHandler<TouchEventArgs>(OnTouchDown));
             _source.RemoveHandler(UIElement.TouchMoveEvent, new EventHandler<TouchEventArgs>(OnTouchMove));
             _source.RemoveHandler(UIElement.TouchUpEvent, new EventHandler<TouchEventArgs>(OnTouchUp));
+        }
+
+        private void OnStylusDownPreview(object sender, RoutedEventArgs e)
+        {
+            Ink_Canvas.Helpers.LogHelper.WriteLogToFile(
+                $"[WetInk] PREVIEW StylusDown handled={(e as StylusDownEventArgs)?.Handled}");
+            if (e is StylusDownEventArgs sde) OnStylusDown(sender, sde);
+        }
+
+        private void OnStylusMovePreview(object sender, RoutedEventArgs e)
+        {
+            if (e is StylusEventArgs se) OnStylusMove(sender, se);
+        }
+
+        private void OnStylusUpPreview(object sender, RoutedEventArgs e)
+        {
+            if (e is StylusEventArgs se) OnStylusUp(sender, se);
+        }
+
+        private void OnTouchDownPreview(object sender, TouchEventArgs e)
+        {
+            Ink_Canvas.Helpers.LogHelper.WriteLogToFile(
+                $"[WetInk] PREVIEW TouchDown handled={e.Handled}");
+            OnTouchDown(sender, e);
+        }
+
+        private void OnTouchMovePreview(object sender, TouchEventArgs e)
+        {
+            OnTouchMove(sender, e);
+        }
+
+        private void OnTouchUpPreview(object sender, TouchEventArgs e)
+        {
+            OnTouchUp(sender, e);
         }
 
         private void OnStylusDownRouted(object sender, RoutedEventArgs e)
