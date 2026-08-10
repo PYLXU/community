@@ -188,6 +188,23 @@ namespace Ink_Canvas.Ink.WetInk
             }
         }
 
+        /// <summary>是否存在「湿墨仍在屏幕上」的会话（含干墨待合成期），决定覆盖层是否可见。</summary>
+        public bool HasLiveWetVisual()
+        {
+            foreach (var kv in _bySession)
+            {
+                var s = kv.Value.State;
+                if (s == WetInkSessionState.Active ||
+                    s == WetInkSessionState.Ending ||
+                    s == WetInkSessionState.DryCommittedAwaitingWpfFrame ||
+                    s == WetInkSessionState.RetiringWetVisual)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         public WetInkSession Begin(
             uint pointerId,
             WetInkInputKind inputKind,

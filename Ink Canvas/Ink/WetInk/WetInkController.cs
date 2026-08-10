@@ -7,6 +7,9 @@ namespace Ink_Canvas.Ink.WetInk
     /// <summary>控制器对外回调：把事件送回 UI 线程。</summary>
     internal interface IWetInkControllerSink
     {
+        /// <summary>会话开始（已创建会话并投递首帧几何），UI 线程应显示湿墨覆盖层。</summary>
+        void OnStrokeStarted(long sessionId);
+
         /// <summary>会话结束（已构建载荷），UI 线程负责提交到 inkCanvas.Strokes。</summary>
         void OnStrokeCompleted(WetInkCommitPayload payload);
 
@@ -143,6 +146,9 @@ namespace Ink_Canvas.Ink.WetInk
 
                 session.AppendReal(processed);
                 PostGeometry(session);
+
+                try { _sink.OnStrokeStarted(session.SessionId); }
+                catch (Exception ex) { Debug.WriteLine($"[WetInk] stroke-started notify: {ex.Message}"); }
                 return true;
             }
 

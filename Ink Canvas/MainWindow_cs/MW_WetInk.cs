@@ -324,6 +324,12 @@ namespace Ink_Canvas
         // IWetInkControllerSink
         // ==================================================================
 
+        void IWetInkControllerSink.OnStrokeStarted(long sessionId)
+        {
+            // 开始有湿墨视觉：把覆盖层摆上屏幕（旧系统 SetOverlayVisible(true)）。
+            _wetInkHost?.SetOverlayVisible(true);
+        }
+
         void IWetInkControllerSink.OnStrokeCompleted(WetInkCommitPayload payload)
         {
             try
@@ -338,12 +344,29 @@ namespace Ink_Canvas
 
         void IWetInkControllerSink.OnStrokeCanceled(long sessionId)
         {
-            // 控制器已清理会话；这里无需动作。
+            // 取消可能使湿墨清空：按「是否仍有在途湿墨」刷新覆盖层可见性。
+            RefreshWetInkOverlayVisibility();
         }
 
         void IWetInkControllerSink.OnSessionRetired(long sessionId)
         {
-            // 会话已从管理器移除；无需动作。
+            // 最后一个湿墨视觉退休：覆盖层挪回屏外，停止拦截桌面点击。
+            RefreshWetInkOverlayVisibility();
+        }
+
+        private void RefreshWetInkOverlayVisibility()
+        {
+            if (_wetInkHost == null)
+                return;
+            try
+            {
+                var live = _wetInkSessions?.HasLiveWetVisual() == true;
+                _wetInkHost.SetOverlayVisible(live);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[WetInk] overlay visibility: {ex.Message}");
+            }
         }
 
         WetInkRouteDecision IWetInkControllerSink.QueryDownRoute(

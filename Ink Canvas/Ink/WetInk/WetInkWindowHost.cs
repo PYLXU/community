@@ -143,6 +143,33 @@ namespace Ink_Canvas.Ink.WetInk
                 WetInkRibbonGeometry.Empty, default, 0, target));
         }
 
+        /// <summary>
+        /// 控制覆盖层是否在屏幕上。有真实湿墨视觉时才为 true（此时按最新 target
+        /// 摆到主窗口上方），否则移到屏外。与旧系统 SetOverlayVisible 等价——
+        /// 覆盖层绝不允许在「没有湿墨」的时候停留在屏幕上拦截点击。
+        /// </summary>
+        public void SetOverlayVisible(bool visible)
+        {
+            _overlayShouldBeVisible = visible;
+            if (_hwnd == IntPtr.Zero || _disposed)
+                return;
+
+            if (visible && _pendingTarget.IsValid)
+            {
+                SetWindowPos(
+                    _hwnd, IntPtr.Zero,
+                    _pendingTarget.ScreenLeftPixels, _pendingTarget.ScreenTopPixels,
+                    _pendingTarget.WidthPixels, _pendingTarget.HeightPixels,
+                    SwpNoActivate | SwpNoZOrder);
+            }
+            else
+            {
+                ParkOffscreen();
+            }
+        }
+
+        private bool _overlayShouldBeVisible;
+
         /// <summary>把覆盖层挪到离屏（不使用 ShowWindow，避免 DWM 闪屏）。</summary>
         public void ParkOffscreen()
         {
@@ -202,8 +229,10 @@ namespace Ink_Canvas.Ink.WetInk
         {
             while (_running)
             {
-                // 等命令；超时唤醒用于处理窗口消息与设备丢失检查。
-                _mailbox.WaitHandle.WaitOne(16);
+                // 与旧系统一致：1ms 轮询而非阻塞 16ms。覆盖层窗口的 WndProc 由本线程
+                // 应答（WM_NCHITTEST 等同步 SendMessage）；阻塞太长会让 SendMessage
+                // 超时，鼠标表现为撞在一块实心全屏窗口上。
+                _mailbox.WaitHandle.WaitOne(1);
 
                 PumpWindowMessages();
 
@@ -319,8 +348,11 @@ namespace Ink_Canvas.Ink.WetInk
                 WindowClassName,
                 string.Empty,
                 WsPopup | WsVisible,
-                target.IsValid ? target.ScreenLeftPixels : HiddenPosition,
-                target.IsValid ? target.ScreenTopPixels : HiddenPosition,
+                // 旧系统先例：覆盖层始终从屏外坐标创建，只在有真实湿墨时才
+                // SetOverlayVisible(true) 移到屏幕上；没有湿墨时一律在屏外。
+                // 不能在创建时就用屏幕坐标，否则整屏立刻被这块全屏窗口拦截。
+                HiddenPosition,
+                HiddenPosition,
                 Math.Max(1, target.WidthPixels),
                 Math.Max(1, target.HeightPixels),
                 IntPtr.Zero,
