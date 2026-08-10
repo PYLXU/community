@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Ink;
@@ -65,16 +67,7 @@ namespace Ink_Canvas
                 _wetInkHostWindow.ContactUp += OnWetInkContactUp;
                 _wetInkPresenterBridge.StrokesCollected += OnWetInkStrokesCollected;
 
-                _wetInkRouter = new WetInkRouter(
-                    () => ViewboxFloatingBar,
-                    () => IdleMiniBar,
-                    () => ViewboxBlackboardLeftSide,
-                    () => ViewboxBlackboardCenterSide,
-                    () => ViewboxBlackboardRightSide,
-                    () => LeftSidePanelForPPTNavigation,
-                    () => RightSidePanelForPPTNavigation,
-                    () => LeftBottomPanelForPPTNavigation,
-                    () => RightBottomPanelForPPTNavigation);
+                _wetInkRouter = new WetInkRouter();
 
                 _wetInkCommitSink = new WetInkCommitSink(
                     Dispatcher, _wetInkPresenterBridge, CommitWetInkStrokeToDryLayer);
@@ -186,20 +179,20 @@ namespace Ink_Canvas
             {
                 var dpiScale = GetDpiScale();
                 var clientOrigin = PointToScreen(new Point(0, 0));
-                var exclusionRects = _wetInkRouter.BuildExclusionRects(this);
-
-                // 关键：ICC 浮动栏是液态玻璃浮动栏（LiquidGlassBarWindow，独立顶层窗口），
-                // 不在主窗口内。覆盖窗口全屏时也必须避开所有可见的应用窗口，
-                // 否则这些窗口全被透明覆盖层盖住点不到。
+                // 遍历主窗口视觉树收集所有可见可命中的 UI chrome（跳过画布容器），
+                // 对动态构建的 FloatingToolbar/BoardToolbar 也通用。
+                var exclusionRects = _wetInkRouter.BuildAllChromeRects(
+                    this, dpiScale, clientOrigin, InkCanvasGridForInkReplay);
                 foreach (Window w in System.Windows.Application.Current.Windows)
                 {
                     if (w == this || w.Visibility != Visibility.Visible) continue;
                     try
                     {
-                        var tl = w.PointToScreen(new Point(0, 0));
-                        var r = new Rect(tl.X, tl.Y, w.ActualWidth, w.ActualHeight);
-                        if (r.Width > 0 && r.Height > 0)
-                            exclusionRects.Add(r);
+                        var hwnd = new WindowInteropHelper(w).Handle;
+                        if (hwnd == IntPtr.Zero) continue;
+                        if (!GetWindowRect(hwnd, out var r)) continue;
+                        if (r.Right > r.Left && r.Bottom > r.Top)
+                            exclusionRects.Add(new Rect(r.Left, r.Top, r.Right - r.Left, r.Bottom - r.Top));
                     }
                     catch { }
                 }
@@ -212,12 +205,12 @@ namespace Ink_Canvas
                     ActualHeight,
                     exclusionRects);
 
+                var rectDetails = exclusionRects.Count == 0 ? "" :
+                    " [" + string.Join(" | ", exclusionRects.Select(r =>
+                        $"({r.X:0},{r.Y:0},{r.Width:0}x{r.Height:0})")) + "]";
                 LogHelper.WriteLogToFile(
                     $"新墨迹引擎覆盖窗口: origin=({clientOrigin.X:0},{clientOrigin.Y:0}) size=({ActualWidth:0}x{ActualHeight:0}) " +
-                    $"排除区={exclusionRects.Count}个" +
-                    (exclusionRects.Count > 0
-                        ? $" 首区=({exclusionRects[0].X:0},{exclusionRects[0].Y:0},{exclusionRects[0].Width:0}x{exclusionRects[0].Height:0})"
-                        : ""),
+                    $"排除区={exclusionRects.Count}个{rectDetails}",
                     LogHelper.LogType.Trace);
 
                 _wetInkPresenterBridge?.UpdateTargetSize(
@@ -356,6 +349,13 @@ namespace Ink_Canvas
         }
 
         // ---------------- 样式 / 手掌策略 / 坐标 ----------------
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetWindowRect(IntPtr hWnd, out Win32RECT lpRect);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct Win32RECT { public int Left, Top, Right, Bottom; }
 
         /// <summary>当前笔属性（inkCanvas.DefaultDrawingAttributes）→ 引擎样式快照。</summary>
         private WetInkStyleSnapshot BuildWetInkStyleSnapshot()

@@ -1,61 +1,66 @@
 using System;
 using System.Collections.Generic;
 using System.Windows;
-using System.Windows.Controls;
+using System.Windows.Media;
 
 namespace Ink_Canvas.Ink.WetInk
 {
     /// <summary>
-    /// 命中测试与 chrome 排除。结构式：覆盖窗口的 SetWindowRgn 已经按这些矩形把 chrome
-    /// 从墨迹窗口里挖掉，指针在 chrome 区域自然落到主窗口 —— 无旧系统的白名单穿透问题。
-    /// 这里只负责收集 chrome 元素在「主窗口客户端 DIP」坐标下的几何矩形。
+    /// chrome 排除矩形收集。浮动栏/工具栏是动态构建的（FloatingToolbar/BoardToolbar），
+    /// 无法用固定元素列表枚举 —— 改为遍历主窗口视觉树，收集所有可见且可命中的
+    /// FrameworkElement（跳过画布容器子树）。对任何动态 UI 都通用。
     /// </summary>
     internal sealed class WetInkRouter
     {
-        private readonly Func<FrameworkElement>[] _chromeElementProviders;
-
-        public WetInkRouter(params Func<FrameworkElement>[] chromeElementProviders)
+        public WetInkRouter()
         {
-            _chromeElementProviders = chromeElementProviders ?? Array.Empty<Func<FrameworkElement>>();
         }
 
         /// <summary>
-        /// 收集 chrome 排除矩形（**屏幕 DIP** 坐标）。元素不可见/未布局则跳过。
-        /// 屏幕坐标与 WM_NCHITTEST 的 lParam（屏幕像素）一致，区域裁剪时再换算客户端坐标。
+        /// 遍历主窗口视觉树收集 chrome 排除矩形（屏幕像素）。
+        /// skipSubtreeRoot = 画布容器（其子树全部跳过，画布要接收墨迹不排除）。
         /// </summary>
-        public List<Rect> BuildExclusionRects(Window owner)
+        public List<Rect> BuildAllChromeRects(
+            Window mainWindow, double dpiScale, Point screenOriginPx, DependencyObject skipSubtreeRoot)
         {
             var rects = new List<Rect>();
-            if (owner == null) return rects;
-
-            foreach (var provider in _chromeElementProviders)
-            {
-                FrameworkElement element = null;
-                try { element = provider?.Invoke(); }
-                catch { continue; }
-
-                if (element == null) continue;
-                if (element.Visibility != Visibility.Visible) continue;
-                if (element.ActualWidth <= 0 || element.ActualHeight <= 0) continue;
-
-                try
-                {
-                    var topLeft = element.PointToScreen(new Point(0, 0));
-                    var rect = new Rect(
-                        topLeft.X,
-                        topLeft.Y,
-                        element.ActualWidth,
-                        element.ActualHeight);
-                    if (rect.Width > 0 && rect.Height > 0)
-                        rects.Add(rect);
-                }
-                catch
-                {
-                    // 元素尚未参与布局，跳过。
-                }
-            }
-
+            if (mainWindow == null) return rects;
+            CollectChrome(mainWindow, mainWindow, dpiScale, screenOriginPx, skipSubtreeRoot, rects);
             return rects;
+        }
+
+        private void CollectChrome(
+            DependencyObject parent, Window mainWindow, double dpiScale, Point screenOriginPx,
+            DependencyObject skipRoot, List<Rect> rects)
+        {
+            int count = VisualTreeHelper.GetChildrenCount(parent);
+            for (int i = 0; i < count; i++)
+            {
+                var child = VisualTreeHelper.GetChild(parent, i);
+                if (ReferenceEquals(child, skipRoot)) continue; // 跳过画布容器子树
+
+                var fe = child as FrameworkElement;
+                if (fe != null && fe.Visibility == Visibility.Visible && fe.IsHitTestVisible
+                    && fe.ActualWidth > 0 && fe.ActualHeight > 0 && !string.IsNullOrEmpty(fe.Name))
+                {
+                    try
+                    {
+                        var local = fe.TranslatePoint(new Point(0, 0), mainWindow);
+                        var x = screenOriginPx.X + local.X * dpiScale;
+                        var y = screenOriginPx.Y + local.Y * dpiScale;
+                        var w = fe.ActualWidth * dpiScale;
+                        var h = fe.ActualHeight * dpiScale;
+                        if (w > 0 && h > 0 && x >= 0 && y >= 0 && x < 4000 && y < 4000)
+                            rects.Add(new Rect(x, y, w, h));
+                    }
+                    catch
+                    {
+                        // 元素尚未参与布局，跳过。
+                    }
+                }
+
+                CollectChrome(child, mainWindow, dpiScale, screenOriginPx, skipRoot, rects);
+            }
         }
     }
 }
