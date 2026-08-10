@@ -114,6 +114,15 @@
   <data name="Canvas_EnablePressureTouchHint" xml:space="preserve">
     <value>When on, touch screens that support pressure will show pressure; for devices not recognized by the system.</value>
   </data>
+  <data name="Canvas_UseLegacyInkSystem" xml:space="preserve">
+    <value>Use legacy ink system</value>
+  </data>
+  <data name="Canvas_UseLegacyInkSystemHint" xml:space="preserve">
+    <value>Uses the legacy ink input (WPF InkCanvas). The new engine is tuned for touch and four-side infrared devices; Windows 10+ uses the new engine by default, switch only when the new engine has compatibility problems.</value>
+  </data>
+  <data name="Canvas_UseLegacyInkSystemRestartNotice" xml:space="preserve">
+    <value>Changing the ink system requires an app restart.</value>
+  </data>
   <data name="Canvas_EraserSize" xml:space="preserve">
     <value>Eraser size</value>
   </data>

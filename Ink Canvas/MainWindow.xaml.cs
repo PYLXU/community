@@ -1359,6 +1359,9 @@ namespace Ink_Canvas
             var inkCanvas1 = sender as InkCanvas;
             if (inkCanvas1 == null) return;
 
+            // 新墨迹引擎：物理 EditingMode 与逻辑笔型的一致性（引擎挂载时写墨类恒为 None）。
+            SyncWetInkWithEditingMode(inkCanvas1.EditingMode);
+
             NotifyPluginPenModeChanged(inkCanvas1.EditingMode);
 
             if (IsCurrentPageFrozen && IsFreezeMutatingMode(inkCanvas1.EditingMode))
@@ -1487,6 +1490,8 @@ namespace Ink_Canvas
             }
             // 加载设置
             LoadSettings(true);
+            // 装配新墨迹引擎（若用户选择新墨迹系统；旧墨迹默认下为 no-op）。
+            TryStartWetInkPipeline();
             // 启动性能监测（如果已启用）。快速启动模式下延迟到首帧之后。
             // 实时笔迹详细调试日志独立于性能监测，由 Debug 页开关控制，默认关闭。
             if (!App.IsFastStartupEnabled)
@@ -1660,6 +1665,7 @@ namespace Ink_Canvas
 
         private void SystemEventsOnDisplaySettingsChanged(object sender, EventArgs e)
         {
+            SyncWetInkConfiguration();
             if (!Settings.Advanced.IsEnableResolutionChangeDetection) return;
             ShowNotification(string.Format(Properties.MainWindowStrings.Main_DisplayChanged, Screen.PrimaryScreen.Bounds.Width, Screen.PrimaryScreen.Bounds.Height));
             HandleFloatingBarRecovery();
@@ -1667,6 +1673,7 @@ namespace Ink_Canvas
 
         private void MainWindow_OnDpiChanged(object sender, DpiChangedEventArgs e)
         {
+            SyncWetInkConfiguration();
             if (e.OldDpi.DpiScaleX != e.NewDpi.DpiScaleX && e.OldDpi.DpiScaleY != e.NewDpi.DpiScaleY && Settings.Advanced.IsEnableDPIChangeDetection)
             {
                 ShowNotification(string.Format(Properties.MainWindowStrings.Main_DPIChanged, e.OldDpi.DpiScaleX, e.OldDpi.DpiScaleY, e.NewDpi.DpiScaleX, e.NewDpi.DpiScaleY));
@@ -1869,6 +1876,7 @@ namespace Ink_Canvas
 
         private void MainWindow_OnSizeChanged(object sender, SizeChangedEventArgs e)
         {
+            SyncWetInkConfiguration();
             if (Settings.Advanced.IsEnableForceFullScreen)
             {
                 if (isLoaded) ShowNotification(
@@ -1888,6 +1896,7 @@ namespace Ink_Canvas
         /// <param name="e">关闭事件的参数（未使用）。</param>
         private void Window_Closed(object sender, EventArgs e)
         {
+            ShutdownWetInkPipeline();
             RealtimeInkFrameScheduler.Clear();
             SystemEvents.DisplaySettingsChanged -= SystemEventsOnDisplaySettingsChanged;
             // 玻璃浮动栏刻意不设 Owner，必须显式关闭，否则残留窗口会挡住进程退出

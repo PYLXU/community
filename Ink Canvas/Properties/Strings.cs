@@ -296,6 +296,9 @@ namespace Ink_Canvas.Properties
             dict["Canvas_SwitchBackAfterEraserHint"] = ("CanvasStrings", "Canvas_SwitchBackAfterEraserHint");
             dict["Canvas_SwitchBackDelay"] = ("CanvasStrings", "Canvas_SwitchBackDelay");
             dict["Canvas_SwitchBackDelayHint"] = ("CanvasStrings", "Canvas_SwitchBackDelayHint");
+            dict["Canvas_UseLegacyInkSystem"] = ("CanvasStrings", "Canvas_UseLegacyInkSystem");
+            dict["Canvas_UseLegacyInkSystemHint"] = ("CanvasStrings", "Canvas_UseLegacyInkSystemHint");
+            dict["Canvas_UseLegacyInkSystemRestartNotice"] = ("CanvasStrings", "Canvas_UseLegacyInkSystemRestartNotice");
             dict["Canvas_WPFBezier"] = ("CanvasStrings", "Canvas_WPFBezier");
             dict["Canvas_Yes"] = ("CanvasStrings", "Canvas_Yes");
             dict["CanvasAndInkPanel_1920×1080Hint"] = ("CanvasStrings", "CanvasAndInkPanel_1920_1080Hint");

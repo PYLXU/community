@@ -85,6 +85,14 @@
                             SwitchName="ToggleSwitchDisablePressure"
                             Toggled="ToggleSwitchDisablePressure_Toggled" />
 
+                    <!-- 新墨迹引擎切换：与旧墨迹严格互斥，重启生效 -->
+                    <controls:LabeledSettingsCard x:Name="CardUseLegacyInkSystem"
+                            Header="{x:Static props:CanvasStrings.Canvas_UseLegacyInkSystem}"
+                            Description="{x:Static props:CanvasStrings.Canvas_UseLegacyInkSystemHint}"
+                            Icon="{x:Static ui:SegoeFluentIcons.PenWorkspace}"
+                            SwitchName="ToggleSwitchUseLegacyInkSystem"
+                            Toggled="ToggleSwitchUseLegacyInkSystem_Toggled" />
+
                     <!-- 简单下拉：声明式绑定 -->
                     <ui:SettingsCard Header="{x:Static props:CanvasStrings.Canvas_EraserSize}"
                             Description="{x:Static props:CanvasStrings.Canvas_EraserSizeHint}">

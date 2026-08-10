@@ -1,0 +1,393 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+
+namespace Ink_Canvas.Ink.WetInk
+{
+    /// <summary>控制器对外回调：把事件送回 UI 线程。</summary>
+    internal interface IWetInkControllerSink
+    {
+        /// <summary>会话结束（已构建载荷），UI 线程负责提交到 inkCanvas.Strokes。</summary>
+        void OnStrokeCompleted(WetInkCommitPayload payload);
+
+        /// <summary>会话取消（手势接管/冻结），不提交。</summary>
+        void OnStrokeCanceled(long sessionId);
+
+        /// <summary>会话已完成湿墨退休（干墨已合成），可清理会话。</summary>
+        void OnSessionRetired(long sessionId);
+
+        /// <summary>需要路由决策时查询宿主。</summary>
+        WetInkRouteDecision QueryDownRoute(
+            WetInkPointerBatch batch,
+            double contactWidthDip,
+            bool useFingerMode);
+
+        /// <summary>路由上下文（活动触摸数等）。</summary>
+        WetInkRouteContext QueryRouteContext();
+    }
+
+    /// <summary>
+    /// 湿墨控制器：WM_POINTER/WPF 输入批 → 分类 → 路由 → 会话 → 渲染命令。
+    /// 运行在 UI 线程（输入回调同步调用），渲染通过 WetInkWindowHost 信箱解耦。
+    /// </summary>
+    internal sealed class WetInkController : IDisposable
+    {
+        /// <summary>会话「手指微抬」续笔窗口：此窗口内的重新落笔视为同一笔。</summary>
+        private const long TouchLiftToleranceMicroseconds = 60_000;
+
+        public WetInkController(
+            WetInkSessionManager sessions,
+            WetInkCommandMailbox mailbox,
+            WetInkTouchClassifier classifier,
+            IWetInkControllerSink sink,
+            bool predictionEnabled)
+        {
+            _sessions = sessions ?? throw new ArgumentNullException(nameof(sessions));
+            _mailbox = mailbox ?? throw new ArgumentNullException(nameof(mailbox));
+            _classifier = classifier ?? throw new ArgumentNullException(nameof(classifier));
+            _sink = sink ?? throw new ArgumentNullException(nameof(sink));
+            _predictor = new WetInkTailPredictor(predictionEnabled);
+        }
+
+        private readonly WetInkSessionManager _sessions;
+        private readonly WetInkCommandMailbox _mailbox;
+        private readonly WetInkTouchClassifier _classifier;
+        private readonly IWetInkControllerSink _sink;
+        private readonly WetInkTailPredictor _predictor;
+
+        /// <summary>每个会话的处理管道（平滑/压感）。</summary>
+        private readonly Dictionary<long, WetInkSampleProcessor> _processors =
+            new Dictionary<long, WetInkSampleProcessor>();
+
+        private double _dpiX = 1.0;
+        private double _dpiY = 1.0;
+
+        /// <summary>当前笔样式快照（MainWindow 在工具/样式变化时更新，落笔时冻结）。</summary>
+        private WetInkStyleSnapshot _currentStyle;
+
+        private bool _disposed;
+
+        /// <summary>DPI 更新（由 MainWindow 在窗口 DPI 变化时调用）。</summary>
+        public void SetDpi(double dpiX, double dpiY)
+        {
+            _dpiX = dpiX > 0 ? dpiX : 1.0;
+            _dpiY = dpiY > 0 ? dpiY : 1.0;
+        }
+
+        /// <summary>更新当前笔样式（颜色/宽度/笔尖/渲染模式）。</summary>
+        public void SetCurrentStyle(in WetInkStyleSnapshot style)
+        {
+            _currentStyle = style;
+        }
+
+        /// <summary>处理一个输入批。phase 决定 Down/Update/Up/CaptureLost。</summary>
+        public void OnPointerInput(WetInkPointerPhase phase, WetInkPointerBatch batch)
+        {
+            if (_disposed || batch == null || batch.SamplesNewestFirst.Count == 0)
+                return;
+
+            switch (phase)
+            {
+                case WetInkPointerPhase.Down:
+                    OnDown(batch);
+                    break;
+                case WetInkPointerPhase.Update:
+                    OnUpdate(batch);
+                    break;
+                case WetInkPointerPhase.Up:
+                    OnUp(batch);
+                    break;
+                case WetInkPointerPhase.CaptureLost:
+                    OnCaptureLost(batch);
+                    break;
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // down
+        // ------------------------------------------------------------------
+
+        private void OnDown(WetInkPointerBatch batch)
+        {
+            var pointerId = batch.PointerId;
+            var sample = batch.SamplesNewestFirst[0];
+
+            // 会话续笔：同一设备在容错窗口内重新落笔，继续上一笔。
+            if (TryResumeTouchedSession(pointerId, sample))
+                return;
+
+            // 已有活动会话：先取消（陈旧会话保护）。
+            if (_sessions.TryGetByPointer(pointerId, out var stale))
+            {
+                CancelSession(stale);
+                _sessions.DetachPointer(pointerId);
+            }
+
+            var contactWidthDip = _classifier.GetContactWidthDip(sample, _dpiX, _dpiY);
+            var useFingerMode = batch.InputKind == WetInkInputKind.Touch;
+            var decision = _sink.QueryDownRoute(batch, contactWidthDip, useFingerMode);
+
+            if (!decision.EngineOwnsStroke)
+                return;
+
+            if (decision.Route == WetInkRoute.Ink || decision.Route == WetInkRoute.PointErase)
+            {
+                var session = _sessions.Begin(
+                    pointerId,
+                    batch.InputKind,
+                    _currentStyle,
+                    decision.Route,
+                    decision.PalmEraserWidthDip);
+
+                _processors[session.SessionId] = CreateProcessor();
+                var processed = _processors[session.SessionId].Process(batch.SamplesNewestFirst);
+
+                session.AppendReal(processed);
+                PostGeometry(session);
+            }
+        }
+
+        /// <summary>
+        /// 「手指微抬」容错：红外触摸框手指轻微抬起会产生瞬时 Up→Down。
+        /// 若离上次抬笔在容错窗口内，把它续到上一笔而不是新起一笔。
+        /// </summary>
+        private bool TryResumeTouchedSession(uint pointerId, in WetInkSample sample)
+        {
+            if (!_sessions.TryGetByPointer(pointerId, out var session))
+                return false;
+            if (session.State != WetInkSessionState.Active)
+                return false;
+
+            var gap = sample.TimestampMicroseconds - session.LastRealTimestampMicroseconds;
+            if (gap < 0 || gap > TouchLiftToleranceMicroseconds)
+                return false;
+
+            // 续笔：只追加，不重启。
+            var processor = GetOrCreateProcessor(session);
+            var processed = processor.Process(new[] { sample });
+            session.AppendReal(processed);
+            PostGeometry(session);
+            return true;
+        }
+
+        // ------------------------------------------------------------------
+        // update / up / capture lost
+        // ------------------------------------------------------------------
+
+        private void OnUpdate(WetInkPointerBatch batch)
+        {
+            if (!_sessions.TryGetByPointer(batch.PointerId, out var session))
+                return;
+            if (session.State != WetInkSessionState.Active)
+                return;
+
+            var processor = GetOrCreateProcessor(session);
+            var processed = processor.Process(batch.SamplesNewestFirst);
+            if (processed.Count == 0)
+                return;
+
+            session.AppendReal(processed);
+
+            // 停顿拉直：书写停顿一定时间后把笔画拉直成线。
+            if (session.RealSampleCount >= 4)
+                MaybeStraighten(session);
+
+            // 预测 + 原子替换。
+            var predicted = _predictor.Predict(session.RealSamples);
+            session.ReplacePrediction(predicted);
+
+            PostGeometry(session);
+        }
+
+        private void OnUp(WetInkPointerBatch batch)
+        {
+            if (!_sessions.TryGetByPointer(batch.PointerId, out var session))
+                return;
+            if (session.State == WetInkSessionState.Active)
+                session.BeginEnding();
+
+            // 预测已随 BeginEnding 丢弃；这里把最终几何发给渲染线程。
+            PostGeometry(session);
+
+            // 构建干墨载荷 → 提交。pointerId 先解绑，允许同一设备立刻开新笔。
+            var payload = session.BuildCommitPayload();
+            _sessions.DetachPointer(batch.PointerId);
+
+            // 太短的笔画（轻点/误触）丢弃。
+            if (payload.Samples.Length < 2)
+            {
+                CancelSession(session);
+                return;
+            }
+
+            _sink.OnStrokeCompleted(payload);
+
+            // 湿墨要等干墨合成后才 retire（防烘干闪变），由 sink 经 MainWindow
+            // 的 WPF 帧 fence 之后回调 OnWpfFrameRendered。
+            PostEndStroke(session);
+        }
+
+        private void OnCaptureLost(WetInkPointerBatch batch)
+        {
+            if (!_sessions.TryGetByPointer(batch.PointerId, out var session))
+                return;
+
+            // 捕获丢失（手势接管/冻结）：取消整笔，不提交。
+            CancelSession(session);
+            _sessions.DetachPointer(batch.PointerId);
+        }
+
+        // ------------------------------------------------------------------
+        // retirement
+        // ------------------------------------------------------------------
+
+        /// <summary>WPF 干墨合成帧已过（MainWindow 的帧 fence 调用），撤湿墨。</summary>
+        public void OnWpfFrameRendered(long sessionId)
+        {
+            if (!_sessions.TryGetBySession(sessionId, out var session))
+                return;
+
+            session.MarkWpfFrameRendered();
+
+            _mailbox.Post(WetInkCommand.Simple(WetInkCommandKind.RetireStroke, sessionId));
+            _sessions.Remove(sessionId);
+            _processors.Remove(sessionId);
+            _lastUpdateMicroseconds.Remove(sessionId);
+
+            _sink.OnSessionRetired(sessionId);
+        }
+
+        private void CancelSession(WetInkSession session)
+        {
+            if (session.State == WetInkSessionState.Active ||
+                session.State == WetInkSessionState.Ending)
+            {
+                session.Cancel();
+            }
+
+            _mailbox.Post(WetInkCommand.Simple(WetInkCommandKind.CancelStroke, session.SessionId));
+            _sessions.Remove(session.SessionId);
+            _processors.Remove(session.SessionId);
+            _lastUpdateMicroseconds.Remove(session.SessionId);
+
+            try { _sink.OnStrokeCanceled(session.SessionId); }
+            catch (Exception ex) { Debug.WriteLine($"[WetInk] cancel notify: {ex.Message}"); }
+        }
+
+        /// <summary>取消全部在途会话（视频旋转/换页/清理）。</summary>
+        public void CancelAllSessions(string reason)
+        {
+            var active = _sessions.SnapshotAllSessions();
+            for (var i = 0; i < active.Count; i++)
+            {
+                if (active[i].State == WetInkSessionState.Active ||
+                    active[i].State == WetInkSessionState.Ending)
+                {
+                    CancelSession(active[i]);
+                }
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // straighten
+        // ------------------------------------------------------------------
+
+        private void MaybeStraighten(WetInkSession session)
+        {
+            if (!_straightenEnabled)
+                return;
+
+            var last = session.LastRealTimestampMicroseconds;
+            var previous = _lastUpdateMicroseconds.TryGetValue(session.SessionId, out var prev)
+                ? prev
+                : last;
+            _lastUpdateMicroseconds[session.SessionId] = last;
+
+            if (last - previous < _straightenDelayMicroseconds)
+                return;
+
+            if (session.StraightenToLine())
+                PostGeometry(session);
+        }
+
+        private bool _straightenEnabled;
+        private long _straightenDelayMicroseconds;
+        private readonly Dictionary<long, long> _lastUpdateMicroseconds =
+            new Dictionary<long, long>();
+
+        /// <summary>配置停顿拉直（由 MainWindow 从设置注入）。</summary>
+        public void ConfigureStraighten(bool enabled, int delayMilliseconds)
+        {
+            _straightenEnabled = enabled;
+            _straightenDelayMicroseconds = (long)(Math.Max(50, delayMilliseconds) * 1000L);
+            if (!enabled)
+                _lastUpdateMicroseconds.Clear();
+        }
+
+        // ------------------------------------------------------------------
+        // helpers
+        // ------------------------------------------------------------------
+
+        private WetInkSampleProcessor CreateProcessor()
+        {
+            return new WetInkSampleProcessor(
+                enableSmoothing: true,
+                simulatePressureFromSpeed: false);
+        }
+
+        private WetInkSampleProcessor GetOrCreateProcessor(WetInkSession session)
+        {
+            if (!_processors.TryGetValue(session.SessionId, out var processor))
+            {
+                processor = CreateProcessor();
+                _processors[session.SessionId] = processor;
+            }
+            return processor;
+        }
+
+        /// <summary>把会话当前几何（真实+预测）发给渲染线程。只投 Update，不合并 Begin/End。</summary>
+        private void PostGeometry(WetInkSession session)
+        {
+            var geometry = WetInkGeometryBuilder.Build(
+                session.RealSamples, session.PredictedSamples, session.Style);
+
+            var command = new WetInkCommand(
+                session.State == WetInkSessionState.Active
+                    ? WetInkCommandKind.UpdateStroke
+                    : WetInkCommandKind.EndStroke,
+                session.SessionId,
+                geometry,
+                session.Style,
+                session.SnapshotVersion,
+                default);
+
+            _mailbox.Post(command);
+        }
+
+        private void PostEndStroke(WetInkSession session)
+        {
+            var geometry = WetInkGeometryBuilder.Build(
+                session.RealSamples, session.PredictedSamples, session.Style);
+
+            _mailbox.Post(new WetInkCommand(
+                WetInkCommandKind.EndStroke,
+                session.SessionId,
+                geometry,
+                session.Style,
+                session.SnapshotVersion,
+                default));
+        }
+
+        public void Dispose()
+        {
+            if (_disposed)
+                return;
+            _disposed = true;
+
+            try { CancelAllSessions("dispose"); }
+            catch (Exception ex) { Debug.WriteLine($"[WetInk] dispose cancel: {ex.Message}"); }
+
+            _processors.Clear();
+        }
+    }
+}

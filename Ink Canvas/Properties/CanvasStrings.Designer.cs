@@ -164,6 +164,12 @@ namespace Ink_Canvas.Properties
 
         public static string Canvas_SwitchBackDelayHint => ResourceManager.GetString(nameof(Canvas_SwitchBackDelayHint), _resourceCulture);
 
+        public static string Canvas_UseLegacyInkSystem => ResourceManager.GetString(nameof(Canvas_UseLegacyInkSystem), _resourceCulture);
+
+        public static string Canvas_UseLegacyInkSystemHint => ResourceManager.GetString(nameof(Canvas_UseLegacyInkSystemHint), _resourceCulture);
+
+        public static string Canvas_UseLegacyInkSystemRestartNotice => ResourceManager.GetString(nameof(Canvas_UseLegacyInkSystemRestartNotice), _resourceCulture);
+
         public static string Canvas_WPFBezier => ResourceManager.GetString(nameof(Canvas_WPFBezier), _resourceCulture);
 
         public static string Canvas_Yes => ResourceManager.GetString(nameof(Canvas_Yes), _resourceCulture);

@@ -114,6 +114,15 @@
   <data name="Canvas_EnablePressureTouchHint" xml:space="preserve">
     <value>开启后，触屏设备也将支持压感效果，适用于部分支持压感但无法被系统识别的触屏设备。</value>
   </data>
+  <data name="Canvas_UseLegacyInkSystem" xml:space="preserve">
+    <value>使用旧墨迹系统</value>
+  </data>
+  <data name="Canvas_UseLegacyInkSystemHint" xml:space="preserve">
+    <value>启用后使用旧版墨迹输入（WPF InkCanvas）。新墨迹系统针对触摸与四边红外设备优化；Windows 10 及以上默认使用新墨迹，仅在新引擎出现兼容性问题时建议切换。</value>
+  </data>
+  <data name="Canvas_UseLegacyInkSystemRestartNotice" xml:space="preserve">
+    <value>切换墨迹系统后需要重启应用生效。</value>
+  </data>
   <data name="Canvas_EraserSize" xml:space="preserve">
     <value>橡皮大小</value>
   </data>

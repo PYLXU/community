@@ -223,6 +223,8 @@ namespace Ink_Canvas
 
         internal void EnsureRealtimeStylusPipelineBinding()
         {
+            // 新墨迹引擎激活时旧实时墨迹管线整体停用（互斥保证）。
+            if (IsWetInkPipelineAvailable) return;
             if (inkCanvas == null) return;
 
             inkCanvas.StylusDown -= MainWindow_StylusDown;
@@ -1128,6 +1130,9 @@ namespace Ink_Canvas
         /// </remarks>
         private void MainWindow_TouchDown(object sender, TouchEventArgs e)
         {
+            // 新墨迹引擎激活时旧实时墨迹管线整体停用（互斥保证）。
+            if (IsWetInkPipelineAvailable) return;
+
             // 视频展台特殊模式：所有触摸交给 VideoPresenterSpecialModeContainer 的 Manipulation 处理，
             // 不进入下面的 EditingMode 切换逻辑（避免把 Ink 切到 None 干扰预览绘制）。
             // 图形绘制模式例外：需要走正常绘制流程
@@ -1188,6 +1193,9 @@ namespace Ink_Canvas
         /// </remarks>
         private void MainWindow_StylusDown(object sender, StylusDownEventArgs e)
         {
+            // 新墨迹引擎激活时旧实时墨迹管线整体停用（互斥保证）。
+            if (IsWetInkPipelineAvailable) return;
+
             if (IsTouchStylusDevice(e.StylusDevice))
                 return;
 
@@ -1324,6 +1332,9 @@ namespace Ink_Canvas
         /// </remarks>
         private async void MainWindow_StylusUp(object sender, StylusEventArgs e)
         {
+            // 新墨迹引擎激活时旧实时墨迹管线整体停用（互斥保证）。
+            if (IsWetInkPipelineAvailable) return;
+
             if (IsTouchStylusDevice(e.StylusDevice))
                 return;
 
@@ -1494,6 +1505,9 @@ namespace Ink_Canvas
         /// </remarks>
         private void MainWindow_StylusMove(object sender, StylusEventArgs e)
         {
+            // 新墨迹引擎激活时旧实时墨迹管线整体停用（互斥保证）。
+            if (IsWetInkPipelineAvailable) return;
+
             try
             {
                 if (IsTouchStylusDevice(e.StylusDevice))
@@ -1777,6 +1791,9 @@ namespace Ink_Canvas
         /// </remarks>
         private void Main_Grid_TouchDown(object sender, TouchEventArgs e)
         {
+            // 新墨迹引擎激活时旧实时墨迹管线整体停用（互斥保证）。
+            if (IsWetInkPipelineAvailable) return;
+
             // 视频展台特殊模式：不在此处切换 EditingMode，
             // PreviewTouchDown 已临时切到 None 抑制 InkCanvas 框选/绘制；
             // 这里再切会覆盖 None → Ink，导致特殊模式下仍画出墨迹（Q7 真正根因）。
@@ -1881,6 +1898,9 @@ namespace Ink_Canvas
         /// </remarks>
         private void InkCanvas_PreviewTouchDown(object sender, TouchEventArgs e)
         {
+            // 新墨迹引擎激活时旧实时墨迹管线整体停用（互斥保证）。
+            if (IsWetInkPipelineAvailable) return;
+
             var touchPointForBar = e.GetTouchPoint(this);
             var floatingBarBounds = ViewboxFloatingBar.TransformToAncestor(this).TransformBounds(
                 new Rect(0, 0, ViewboxFloatingBar.ActualWidth, ViewboxFloatingBar.ActualHeight));
@@ -2155,6 +2175,9 @@ namespace Ink_Canvas
         /// </remarks>
         private void InkCanvas_PreviewTouchMove(object sender, TouchEventArgs e)
         {
+            // 新墨迹引擎激活时旧实时墨迹管线整体停用（互斥保证）。
+            if (IsWetInkPipelineAvailable) return;
+
             if (isPalmEraserActive)
             {
                 var touchPoint = e.GetTouchPoint(inkCanvas);
@@ -2220,6 +2243,9 @@ namespace Ink_Canvas
         /// </remarks>
         private void InkCanvas_PreviewTouchUp(object sender, TouchEventArgs e)
         {
+            // 新墨迹引擎激活时旧实时墨迹管线整体停用（互斥保证）。
+            if (IsWetInkPipelineAvailable) return;
+
             // 视频展台特殊模式：所有手指抬起后恢复用户原本的 EditingMode
             // （PreviewTouchDown 中为了抑制 InkCanvas 内部框选临时切到了 None）
             // 图形绘制模式例外：需要走正常绘制流程完成图形

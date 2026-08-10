@@ -31,6 +31,7 @@ namespace Ink_Canvas.Windows.SettingsViews.Pages
                 {
                     CardEnablePressureTouchMode.IsOn = settings.Canvas.EnablePressureTouchMode;
                     CardDisablePressure.IsOn = settings.Canvas.DisablePressure;
+                    CardUseLegacyInkSystem.IsOn = settings.Canvas.UseLegacyInkSystem;
 
                     int curveMode = 0;
                     if (settings.Canvas.UseAdvancedBezierSmoothing) curveMode = 2;
@@ -93,6 +94,13 @@ namespace Ink_Canvas.Windows.SettingsViews.Pages
             SettingsActionHub.OnDisablePressureChanged(CardDisablePressure.IsOn);
             if (!CardDisablePressure.IsOn || !SettingsManager.Settings.Canvas.EnablePressureTouchMode)
                 CardEnablePressureTouchMode.IsOn = SettingsManager.Settings.Canvas.EnablePressureTouchMode;
+            SettingsManager.SaveSettingsToFile();
+        }
+
+        private void ToggleSwitchUseLegacyInkSystem_Toggled(object sender, RoutedEventArgs e)
+        {
+            if (!_isLoaded) return;
+            SettingsManager.Settings.Canvas.UseLegacyInkSystem = CardUseLegacyInkSystem.IsOn;
             SettingsManager.SaveSettingsToFile();
         }
 

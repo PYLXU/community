@@ -412,6 +412,11 @@ namespace Ink_Canvas
         public bool EnablePalmEraser { get; set; } = true;
         [JsonProperty("palmEraserSensitivity")]
         public int PalmEraserSensitivity { get; set; } = 0; // 0-低敏感度, 1-中敏感度, 2-高敏感度
+        [JsonProperty("useLegacyInkSystem")]
+        // true=旧墨迹（WPF InkCanvas），false=新墨迹引擎。默认按系统版本：
+        // Windows 10 及以上用新墨迹，以下用旧墨迹（新引擎依赖 WM_POINTER/D3D11/DComp）。
+        public bool UseLegacyInkSystem { get; set; } =
+            !System.OperatingSystem.IsWindowsVersionAtLeast(10, 0);
         [JsonProperty("clearCanvasAlsoClearImages")]
         public bool ClearCanvasAlsoClearImages { get; set; } = true;
         [JsonProperty("showCircleCenter")]

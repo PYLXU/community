@@ -114,6 +114,15 @@
   <data name="Canvas_EnablePressureTouchHint" xml:space="preserve">
     <value>开启后触屏设备也能压感，专治支持压感但系统装死的触屏，薛定谔的压感。</value>
   </data>
+  <data name="Canvas_UseLegacyInkSystem" xml:space="preserve">
+    <value>回到旧墨迹</value>
+  </data>
+  <data name="Canvas_UseLegacyInkSystemHint" xml:space="preserve">
+    <value>用回 WPF 自带墨迹，新墨迹抽风时的避风港。新墨迹对触摸和四边红外更丝滑；Win10 以上默认新墨迹，能忍就忍。</value>
+  </data>
+  <data name="Canvas_UseLegacyInkSystemRestartNotice" xml:space="preserve">
+    <value>切换墨迹系统得重启，墨迹是薛定谔的，重启才坍缩。</value>
+  </data>
   <data name="Canvas_EraserSize" xml:space="preserve">
     <value>橡皮杀伤力</value>
   </data>

@@ -925,6 +925,13 @@ namespace Ink_Canvas
             bool isOn = toggle.IsOn;
             bool isBoardSender = sender == BoardToggleSwitchEnableMultiTouchMode;
 
+            // 新墨迹引擎原生支持多指书写，旧多指模式开关在新引擎下无意义，忽略。
+            if (IsWetInkPipelineAvailable)
+            {
+                toggle.IsOn = false;
+                return;
+            }
+
             if (isBoardSender)
                 Settings.Gesture.IsEnableMultiTouchModeBoard = isOn;
             else

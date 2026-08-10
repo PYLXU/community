@@ -360,6 +360,10 @@ namespace Ink_Canvas
         /// </remarks>
         private void inkCanvas_StrokeCollected(object sender, InkCanvasStrokeCollectedEventArgs e)
         {
+            // 新墨迹引擎激活时干墨由引擎统一提交（ProcessCommittedStroke 直接调用），
+            // 防止引擎笔画与 WPF 内置采集双重后处理。
+            if (IsWetInkPipelineAvailable) return;
+
             if (e?.Stroke != null)
                 ProcessCommittedStroke(e.Stroke);
         }
