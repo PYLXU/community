@@ -179,10 +179,8 @@ namespace Ink_Canvas
             {
                 var dpiScale = GetDpiScale();
                 var clientOrigin = PointToScreen(new Point(0, 0));
-                // 遍历主窗口视觉树收集所有可见可命中的 UI chrome（跳过画布容器），
-                // 对动态构建的 FloatingToolbar/BoardToolbar 也通用。
-                var exclusionRects = _wetInkRouter.BuildAllChromeRects(
-                    this, dpiScale, clientOrigin, InkCanvasGridForInkReplay);
+                // 视觉树收集 chrome（屏幕 DIP，不能再乘 dpiScale）。
+                var exclusionRects = _wetInkRouter.BuildAllChromeRects(this, clientOrigin, InkCanvasGridForInkReplay);
                 foreach (Window w in System.Windows.Application.Current.Windows)
                 {
                     if (w == this || w.Visibility != Visibility.Visible) continue;
@@ -192,7 +190,10 @@ namespace Ink_Canvas
                         if (hwnd == IntPtr.Zero) continue;
                         if (!GetWindowRect(hwnd, out var r)) continue;
                         if (r.Right > r.Left && r.Bottom > r.Top)
-                            exclusionRects.Add(new Rect(r.Left, r.Top, r.Right - r.Left, r.Bottom - r.Top));
+                            // GetWindowRect 返回物理像素 → 屏幕 DIP
+                            exclusionRects.Add(new Rect(
+                                r.Left / dpiScale, r.Top / dpiScale,
+                                (r.Right - r.Left) / dpiScale, (r.Bottom - r.Top) / dpiScale));
                     }
                     catch { }
                 }

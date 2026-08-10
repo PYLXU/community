@@ -6,32 +6,42 @@ using System.Windows.Media;
 namespace Ink_Canvas.Ink.WetInk
 {
     /// <summary>
-    /// chrome 排除矩形收集。浮动栏/工具栏是动态构建的（FloatingToolbar/BoardToolbar），
-    /// 无法用固定元素列表枚举 —— 改为遍历主窗口视觉树，收集所有可见且可命中的
-    /// FrameworkElement（跳过画布容器子树）。对任何动态 UI 都通用。
+    /// chrome 排除矩形收集（**屏幕 DIP** 坐标）。
+    ///
+    /// 实测教训：
+    /// 1. 浮动栏/工具栏是动态构建的（FloatingToolbar/BoardToolbar），必须遍历视觉树收集。
+    /// 2. 必须**排除全屏容器**（Main_Grid / GridBackgroundCoverHolder 等），否则整个画布被
+    ///    排除，InkPresenter 收不到输入 → 写不了字。
+    /// 3. PointToScreen / TranslatePoint 均返回 DIP，**不能再乘 dpiScale**（否则坐标放大漂移）。
+    ///    覆盖窗口 NCHITTEST 的 lParam 是物理像素，除 dpiScale 后即为屏幕 DIP。
     /// </summary>
     internal sealed class WetInkRouter
     {
-        public WetInkRouter()
-        {
-        }
+        /// <summary>矩形面积超过窗口面积此比例即视为容器，不排除。</summary>
+        private const double MaxChromeAreaRatio = 0.5;
 
         /// <summary>
-        /// 遍历主窗口视觉树收集 chrome 排除矩形（屏幕像素）。
-        /// skipSubtreeRoot = 画布容器（其子树全部跳过，画布要接收墨迹不排除）。
+        /// 遍历主窗口视觉树收集 chrome 排除矩形（屏幕 DIP）。
+        /// skipSubtreeRoot = 画布容器（其子树全部跳过）。
         /// </summary>
         public List<Rect> BuildAllChromeRects(
-            Window mainWindow, double dpiScale, Point screenOriginPx, DependencyObject skipSubtreeRoot)
+            Window mainWindow, Point screenOriginDip, DependencyObject skipSubtreeRoot)
         {
             var rects = new List<Rect>();
             if (mainWindow == null) return rects;
-            CollectChrome(mainWindow, mainWindow, dpiScale, screenOriginPx, skipSubtreeRoot, rects);
+
+            var windowW = mainWindow.ActualWidth;
+            var windowH = mainWindow.ActualHeight;
+            var maxArea = windowW * windowH * MaxChromeAreaRatio;
+
+            CollectChrome(mainWindow, mainWindow, screenOriginDip, skipSubtreeRoot,
+                windowW, windowH, maxArea, rects);
             return rects;
         }
 
         private void CollectChrome(
-            DependencyObject parent, Window mainWindow, double dpiScale, Point screenOriginPx,
-            DependencyObject skipRoot, List<Rect> rects)
+            DependencyObject parent, Window mainWindow, Point screenOriginDip,
+            DependencyObject skipRoot, double windowW, double windowH, double maxArea, List<Rect> rects)
         {
             int count = VisualTreeHelper.GetChildrenCount(parent);
             for (int i = 0; i < count; i++)
@@ -45,12 +55,19 @@ namespace Ink_Canvas.Ink.WetInk
                 {
                     try
                     {
+                        // TranslatePoint 返回 DIP，直接加窗口屏幕原点即屏幕 DIP。
                         var local = fe.TranslatePoint(new Point(0, 0), mainWindow);
-                        var x = screenOriginPx.X + local.X * dpiScale;
-                        var y = screenOriginPx.Y + local.Y * dpiScale;
-                        var w = fe.ActualWidth * dpiScale;
-                        var h = fe.ActualHeight * dpiScale;
-                        if (w > 0 && h > 0 && x >= 0 && y >= 0 && x < 4000 && y < 4000)
+                        var x = screenOriginDip.X + local.X;
+                        var y = screenOriginDip.Y + local.Y;
+                        var w = fe.ActualWidth;
+                        var h = fe.ActualHeight;
+
+                        // 只收「真 chrome」：必须在窗口范围内，且面积不能接近整窗（那是容器）。
+                        var inWindow = x >= screenOriginDip.X - 1 && y >= screenOriginDip.Y - 1
+                            && x < screenOriginDip.X + windowW && y < screenOriginDip.Y + windowH;
+                        var isContainer = w * h > maxArea;
+
+                        if (w > 0 && h > 0 && inWindow && !isContainer)
                             rects.Add(new Rect(x, y, w, h));
                     }
                     catch
@@ -59,7 +76,8 @@ namespace Ink_Canvas.Ink.WetInk
                     }
                 }
 
-                CollectChrome(child, mainWindow, dpiScale, screenOriginPx, skipRoot, rects);
+                CollectChrome(child, mainWindow, screenOriginDip, skipRoot,
+                    windowW, windowH, maxArea, rects);
             }
         }
     }
