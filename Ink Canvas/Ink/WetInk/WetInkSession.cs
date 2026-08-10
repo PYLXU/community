@@ -59,7 +59,6 @@ namespace Ink_Canvas.Ink.WetInk
         }
 
         private readonly List<WetInkSample> _realSamples = new List<WetInkSample>(256);
-        private WetInkSample[] _predictedSamples = Array.Empty<WetInkSample>();
 
         public long SessionId { get; }
         public uint PointerId { get; }
@@ -79,7 +78,6 @@ namespace Ink_Canvas.Ink.WetInk
         public int RealSampleCount => _realSamples.Count;
 
         public IReadOnlyList<WetInkSample> RealSamples => _realSamples;
-        public WetInkSample[] PredictedSamples => _predictedSamples;
 
         /// <summary>追加真实采样（已由处理器平滑/去重）。</summary>
         public void AppendReal(IReadOnlyList<WetInkSample> samples)
@@ -98,23 +96,12 @@ namespace Ink_Canvas.Ink.WetInk
             SnapshotVersion++;
         }
 
-        /// <summary>
-        /// 原子替换预测尾。必须与 AppendReal 在同一次调用内完成，
-        /// 否则会出现 1 帧「预测已撤、真实未到」的空档（旧系统实证）。
-        /// </summary>
-        public void ReplacePrediction(WetInkSample[] predicted)
-        {
-            _predictedSamples = predicted ?? Array.Empty<WetInkSample>();
-            SnapshotVersion++;
-        }
-
-        /// <summary>抬笔：丢弃预测尾，转 Ending。</summary>
+        /// <summary>抬笔：转 Ending。</summary>
         public void BeginEnding()
         {
             if (State != WetInkSessionState.Active)
                 return;
 
-            _predictedSamples = Array.Empty<WetInkSample>();
             State = WetInkSessionState.Ending;
             SnapshotVersion++;
         }
@@ -142,7 +129,6 @@ namespace Ink_Canvas.Ink.WetInk
 
         public void Cancel()
         {
-            _predictedSamples = Array.Empty<WetInkSample>();
             State = WetInkSessionState.Canceled;
             SnapshotVersion++;
         }
@@ -158,7 +144,6 @@ namespace Ink_Canvas.Ink.WetInk
             _realSamples.Clear();
             _realSamples.Add(first);
             _realSamples.Add(last);
-            _predictedSamples = Array.Empty<WetInkSample>();
             SnapshotVersion++;
             return true;
         }

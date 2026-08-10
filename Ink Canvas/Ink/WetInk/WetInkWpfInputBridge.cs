@@ -63,6 +63,16 @@ namespace Ink_Canvas.Ink.WetInk
             _source.AddHandler(UIElement.TouchDownEvent, new EventHandler<TouchEventArgs>(OnTouchDown), handledEventsToo: true);
             _source.AddHandler(UIElement.TouchMoveEvent, new EventHandler<TouchEventArgs>(OnTouchMove), handledEventsToo: true);
             _source.AddHandler(UIElement.TouchUpEvent, new EventHandler<TouchEventArgs>(OnTouchUp), handledEventsToo: true);
+
+            // 鼠标：用户开发/调试设备通常是鼠标（没四边红外板时）。鼠标走 Mouse 事件栈，
+            // 不经 Stylus/Touch。固定 pointerId（命名空间位 0xC0...）不与笔/触摸碰撞。
+            _source.AddHandler(UIElement.MouseLeftButtonDownEvent, new MouseButtonEventHandler(OnMouseDown), handledEventsToo: true);
+            _source.AddHandler(UIElement.MouseMoveEvent, new MouseEventHandler(OnMouseMove), handledEventsToo: true);
+            _source.AddHandler(UIElement.MouseLeftButtonUpEvent, new MouseButtonEventHandler(OnMouseUp), handledEventsToo: true);
+            // Preview 隧道阶段也订阅，绕过冒泡链上可能的 Handled=true 截胡。
+            _source.AddHandler(UIElement.PreviewMouseLeftButtonDownEvent, new MouseButtonEventHandler(OnMouseDown), handledEventsToo: true);
+            _source.AddHandler(UIElement.PreviewMouseMoveEvent, new MouseEventHandler(OnMouseMove), handledEventsToo: true);
+            _source.AddHandler(UIElement.PreviewMouseLeftButtonUpEvent, new MouseButtonEventHandler(OnMouseUp), handledEventsToo: true);
         }
 
         public void Unwire()
@@ -84,10 +94,90 @@ namespace Ink_Canvas.Ink.WetInk
             _source.RemoveHandler(UIElement.TouchDownEvent, new EventHandler<TouchEventArgs>(OnTouchDown));
             _source.RemoveHandler(UIElement.TouchMoveEvent, new EventHandler<TouchEventArgs>(OnTouchMove));
             _source.RemoveHandler(UIElement.TouchUpEvent, new EventHandler<TouchEventArgs>(OnTouchUp));
+            _source.RemoveHandler(UIElement.MouseLeftButtonDownEvent, new MouseButtonEventHandler(OnMouseDown));
+            _source.RemoveHandler(UIElement.MouseMoveEvent, new MouseEventHandler(OnMouseMove));
+            _source.RemoveHandler(UIElement.MouseLeftButtonUpEvent, new MouseButtonEventHandler(OnMouseUp));
+            _source.RemoveHandler(UIElement.PreviewMouseLeftButtonDownEvent, new MouseButtonEventHandler(OnMouseDown));
+            _source.RemoveHandler(UIElement.PreviewMouseMoveEvent, new MouseEventHandler(OnMouseMove));
+            _source.RemoveHandler(UIElement.PreviewMouseLeftButtonUpEvent, new MouseButtonEventHandler(OnMouseUp));
+        }
+
+        // 鼠标用固定 pointerId（与笔/触摸命名空间位不同），用 0xC0_0000_01。
+        public const uint MousePointerIdConst = 0xC0000001;
+        private bool _mouseInContact;
+
+        /// <summary>
+        /// Preview 与冒泡阶段都订阅了同一批事件（Preview 用于绕开链上 Handled=true 的截胡），
+        /// 所以同一个 RoutedEventArgs 会到达两次。这里按实例去重：Preview 先到并处理，
+        /// 冒泡阶段再拿到同一个 args 时直接丢弃，避免一次移动被采两次样。
+        /// </summary>
+        private readonly System.Runtime.CompilerServices.ConditionalWeakTable<RoutedEventArgs, object> _seenArgs =
+            new System.Runtime.CompilerServices.ConditionalWeakTable<RoutedEventArgs, object>();
+
+        private bool AlreadyDispatched(RoutedEventArgs args)
+        {
+            if (args == null) return false;
+            if (_seenArgs.TryGetValue(args, out _)) return true;
+            _seenArgs.Add(args, args);
+            return false;
+        }
+
+        private void OnMouseDown(object sender, MouseButtonEventArgs e)
+        {
+            if (AlreadyDispatched(e)) return;
+            if (e.LeftButton != MouseButtonState.Pressed) return;
+            Ink_Canvas.Helpers.LogHelper.WriteLogToFile("[WetInk] MouseDown");
+            _mouseInContact = true;
+            DispatchMouse(WetInkPointerPhase.Down, e);
+        }
+
+        private void OnMouseMove(object sender, MouseEventArgs e)
+        {
+            if (AlreadyDispatched(e)) return;
+            // 只在按下时下发 Update（避免松开后 mousemove 也走引擎）。
+            if (!_mouseInContact) return;
+            DispatchMouse(WetInkPointerPhase.Update, e);
+        }
+
+        private void OnMouseUp(object sender, MouseButtonEventArgs e)
+        {
+            if (AlreadyDispatched(e)) return;
+            if (!_mouseInContact) return;
+            Ink_Canvas.Helpers.LogHelper.WriteLogToFile("[WetInk] MouseUp");
+            _mouseInContact = false;
+            DispatchMouse(WetInkPointerPhase.Up, e);
+        }
+
+        private void DispatchMouse(WetInkPointerPhase phase, MouseEventArgs args)
+        {
+            var pos = args.GetPosition(_source);
+            var sample = new WetInkSample(
+                MousePointerIdConst,
+                WetInkInputKind.Mouse,
+                pos.X,
+                pos.Y,
+                0.5f,
+                hasPressure: false,
+                WetInkTimestampConverter.NowMicroseconds(),
+                NextFrameId(MousePointerIdConst),
+                phase == WetInkPointerPhase.Up ? WetInkSampleFlags.None : WetInkSampleFlags.InContact,
+                0,
+                0);
+
+            var batch = new WetInkPointerBatch(
+                MousePointerIdConst,
+                WetInkInputKind.Mouse,
+                new[] { sample },
+                false,
+                false,
+                false,
+                false);
+            _handler(phase, batch);
         }
 
         private void OnStylusDownPreview(object sender, RoutedEventArgs e)
         {
+            if (AlreadyDispatched(e)) return;
             Ink_Canvas.Helpers.LogHelper.WriteLogToFile(
                 $"[WetInk] PREVIEW StylusDown handled={(e as StylusDownEventArgs)?.Handled}");
             if (e is StylusDownEventArgs sde) OnStylusDown(sender, sde);
@@ -95,16 +185,19 @@ namespace Ink_Canvas.Ink.WetInk
 
         private void OnStylusMovePreview(object sender, RoutedEventArgs e)
         {
+            if (AlreadyDispatched(e)) return;
             if (e is StylusEventArgs se) OnStylusMove(sender, se);
         }
 
         private void OnStylusUpPreview(object sender, RoutedEventArgs e)
         {
+            if (AlreadyDispatched(e)) return;
             if (e is StylusEventArgs se) OnStylusUp(sender, se);
         }
 
         private void OnTouchDownPreview(object sender, TouchEventArgs e)
         {
+            if (AlreadyDispatched(e)) return;
             Ink_Canvas.Helpers.LogHelper.WriteLogToFile(
                 $"[WetInk] PREVIEW TouchDown handled={e.Handled}");
             OnTouchDown(sender, e);
@@ -112,11 +205,13 @@ namespace Ink_Canvas.Ink.WetInk
 
         private void OnTouchMovePreview(object sender, TouchEventArgs e)
         {
+            if (AlreadyDispatched(e)) return;
             OnTouchMove(sender, e);
         }
 
         private void OnTouchUpPreview(object sender, TouchEventArgs e)
         {
+            if (AlreadyDispatched(e)) return;
             OnTouchUp(sender, e);
         }
 
@@ -250,16 +345,23 @@ namespace Ink_Canvas.Ink.WetInk
 
         private void OnTouchDown(object sender, TouchEventArgs e)
         {
+            if (AlreadyDispatched(e)) return;
             Ink_Canvas.Helpers.LogHelper.WriteLogToFile(
                 $"[WetInk] TouchDown id={TouchPointerId(e.TouchDevice)}");
             DispatchTouch(TouchPointerId(e.TouchDevice), WetInkPointerPhase.Down, e.GetTouchPoint(_source));
         }
 
-        private void OnTouchMove(object sender, TouchEventArgs e) =>
+        private void OnTouchMove(object sender, TouchEventArgs e)
+        {
+            if (AlreadyDispatched(e)) return;
             DispatchTouch(TouchPointerId(e.TouchDevice), WetInkPointerPhase.Update, e.GetTouchPoint(_source));
+        }
 
-        private void OnTouchUp(object sender, TouchEventArgs e) =>
+        private void OnTouchUp(object sender, TouchEventArgs e)
+        {
+            if (AlreadyDispatched(e)) return;
             DispatchTouch(TouchPointerId(e.TouchDevice), WetInkPointerPhase.Up, e.GetTouchPoint(_source));
+        }
 
         private void DispatchTouch(uint pointerId, WetInkPointerPhase phase, TouchPoint touchPoint)
         {

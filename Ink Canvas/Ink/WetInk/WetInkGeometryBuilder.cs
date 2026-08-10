@@ -73,10 +73,10 @@ namespace Ink_Canvas.Ink.WetInk
             if (points.Count == 1)
                 return BuildDot(points[0], style);
 
-            // 上限估算：每段 6 顶点 + 两端帽各 CapSegments*3。
-            var maxVertices = (points.Count - 1) * 6 + CapSegments * 6 + 12;
-            var vertices = new WetInkVertex[maxVertices];
-            var count = 0;
+            // 用 List 而非预分配数组：原来 (points.Count-1)*6 + CapSegments*6 + 12 估算
+            // 没把循环里的「关节帽」算进去，鼠标快速移动 → 关节数 ≈ 段数 + 1 → 越界崩溃。
+            // List 显式 Add，越界不可能。
+            var vertices = new List<WetInkVertex>(points.Count * 6);
 
             var color = style.ColorArgb;
 
@@ -108,43 +108,40 @@ namespace Ink_Canvas.Ink.WetInk
                 var b1y = (float)(b.Y - ny * hb);
 
                 // 两个三角形组成四边形。
-                vertices[count++] = new WetInkVertex(a0x, a0y, color);
-                vertices[count++] = new WetInkVertex(b0x, b0y, color);
-                vertices[count++] = new WetInkVertex(a1x, a1y, color);
+                vertices.Add(new WetInkVertex(a0x, a0y, color));
+                vertices.Add(new WetInkVertex(b0x, b0y, color));
+                vertices.Add(new WetInkVertex(a1x, a1y, color));
 
-                vertices[count++] = new WetInkVertex(a1x, a1y, color);
-                vertices[count++] = new WetInkVertex(b0x, b0y, color);
-                vertices[count++] = new WetInkVertex(b1x, b1y, color);
+                vertices.Add(new WetInkVertex(a1x, a1y, color));
+                vertices.Add(new WetInkVertex(b0x, b0y, color));
+                vertices.Add(new WetInkVertex(b1x, b1y, color));
 
                 // 关节处补一个圆头帽，避免转折出现缺口。
                 if (i > 0)
-                    count = AppendCap(vertices, count, a, ha, color);
+                    AppendCap(vertices, a, ha, color);
             }
 
             // 两端圆头帽。
-            count = AppendCap(vertices, count, points[0], HalfWidth(points[0], style), color);
-            count = AppendCap(vertices, count, points[points.Count - 1],
+            AppendCap(vertices, points[0], HalfWidth(points[0], style), color);
+            AppendCap(vertices, points[points.Count - 1],
                 HalfWidth(points[points.Count - 1], style), color);
 
-            return new WetInkRibbonGeometry(vertices, count);
+            return new WetInkRibbonGeometry(vertices.ToArray(), vertices.Count);
         }
 
         /// <summary>单点（轻点）时画一个圆点。</summary>
         private static WetInkRibbonGeometry BuildDot(
             in WetInkSample sample, in WetInkStyleSnapshot style)
         {
-            var vertices = new WetInkVertex[CapSegments * 3];
-            var count = AppendCap(vertices, 0, sample, HalfWidth(sample, style), style.ColorArgb);
-            return new WetInkRibbonGeometry(vertices, count);
+            var vertices = new List<WetInkVertex>(CapSegments * 3);
+            AppendCap(vertices, sample, HalfWidth(sample, style), style.ColorArgb);
+            return new WetInkRibbonGeometry(vertices.ToArray(), vertices.Count);
         }
 
         /// <summary>在指定点追加一个圆头帽（扇形三角）。</summary>
-        private static int AppendCap(
-            WetInkVertex[] vertices, int count, in WetInkSample center, double halfWidth, uint color)
+        private static void AppendCap(
+            List<WetInkVertex> vertices, in WetInkSample center, double halfWidth, uint color)
         {
-            if (count + CapSegments * 3 > vertices.Length)
-                return count;
-
             var cx = (float)center.X;
             var cy = (float)center.Y;
             var step = Math.PI * 2 / CapSegments;
@@ -154,18 +151,16 @@ namespace Ink_Canvas.Ink.WetInk
                 var a0 = i * step;
                 var a1 = (i + 1) * step;
 
-                vertices[count++] = new WetInkVertex(cx, cy, color);
-                vertices[count++] = new WetInkVertex(
+                vertices.Add(new WetInkVertex(cx, cy, color));
+                vertices.Add(new WetInkVertex(
                     (float)(cx + Math.Cos(a0) * halfWidth),
                     (float)(cy + Math.Sin(a0) * halfWidth),
-                    color);
-                vertices[count++] = new WetInkVertex(
+                    color));
+                vertices.Add(new WetInkVertex(
                     (float)(cx + Math.Cos(a1) * halfWidth),
                     (float)(cy + Math.Sin(a1) * halfWidth),
-                    color);
+                    color));
             }
-
-            return count;
         }
 
         /// <summary>由样式基宽与压感算半宽。</summary>

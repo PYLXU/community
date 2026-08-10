@@ -92,8 +92,7 @@ namespace Ink_Canvas
                     _wetInkSessions,
                     _wetInkHost.Mailbox,
                     _wetInkClassifier,
-                    this,
-                    predictionEnabled: true);
+                    this);
                 _wetInkController.SetDpi(dpiX, dpiY);
                 _wetInkController.SetCurrentStyle(BuildWetInkStyle());
                 _wetInkController.ConfigureStraighten(
@@ -217,6 +216,13 @@ namespace Ink_Canvas
             if (batch == null || batch.SamplesNewestFirst.Count == 0)
                 return false;
 
+            // 关键：桌面「鼠标/透传」模式下引擎必须完全放手，否则整屏被拦截、无法点透。
+            // 判据是画布本身是否参与命中测试 + 可见（退出批注时 MW_FloatingBarIcons
+            // 会把 inkCanvas.IsHitTestVisible=false 或 Visibility=Collapsed 并开启
+            // SetTransparentHitThrough）。此时引擎不接管任何输入。
+            if (!IsWetInkCanvasInteractive())
+                return false;
+
             var route = ResolveLogicalTool();
             if (route != WetInkRoute.Ink &&
                 route != WetInkRoute.PointErase &&
@@ -239,6 +245,21 @@ namespace Ink_Canvas
                 return _wetInkController?.OnPointerInput(phase, batch) ?? false;
 
             return false;
+        }
+
+        /// <summary>
+        /// 画布当前是否真正可书写。退出批注（鼠标/透传模式）时画布被设为
+        /// 不可命中或隐藏，引擎必须放手，保证桌面点击穿透。
+        /// </summary>
+        private bool IsWetInkCanvasInteractive()
+        {
+            if (inkCanvas == null)
+                return false;
+            if (!inkCanvas.IsHitTestVisible)
+                return false;
+            if (inkCanvas.Visibility != Visibility.Visible)
+                return false;
+            return true;
         }
 
         /// <summary>更新逻辑笔型与物理 EditingMode 的一致性（引擎挂载时写墨类恒为 None）。</summary>

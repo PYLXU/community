@@ -45,21 +45,18 @@ namespace Ink_Canvas.Ink.WetInk
             WetInkSessionManager sessions,
             WetInkCommandMailbox mailbox,
             WetInkTouchClassifier classifier,
-            IWetInkControllerSink sink,
-            bool predictionEnabled)
+            IWetInkControllerSink sink)
         {
             _sessions = sessions ?? throw new ArgumentNullException(nameof(sessions));
             _mailbox = mailbox ?? throw new ArgumentNullException(nameof(mailbox));
             _classifier = classifier ?? throw new ArgumentNullException(nameof(classifier));
             _sink = sink ?? throw new ArgumentNullException(nameof(sink));
-            _predictor = new WetInkTailPredictor(predictionEnabled);
         }
 
         private readonly WetInkSessionManager _sessions;
         private readonly WetInkCommandMailbox _mailbox;
         private readonly WetInkTouchClassifier _classifier;
         private readonly IWetInkControllerSink _sink;
-        private readonly WetInkTailPredictor _predictor;
 
         /// <summary>每个会话的处理管道（平滑/压感）。</summary>
         private readonly Dictionary<long, WetInkSampleProcessor> _processors =
@@ -218,10 +215,6 @@ namespace Ink_Canvas.Ink.WetInk
             // 停顿拉直：书写停顿一定时间后把笔画拉直成线。
             if (session.RealSampleCount >= 4)
                 MaybeStraighten(session);
-
-            // 预测 + 原子替换。
-            var predicted = _predictor.Predict(session.RealSamples);
-            session.ReplacePrediction(predicted);
 
             PostGeometry(session);
             return true;
@@ -388,11 +381,11 @@ namespace Ink_Canvas.Ink.WetInk
             return processor;
         }
 
-        /// <summary>把会话当前几何（真实+预测）发给渲染线程。只投 Update，不合并 Begin/End。</summary>
+        /// <summary>把会话当前几何发给渲染线程。只投 Update，不合并 Begin/End。</summary>
         private void PostGeometry(WetInkSession session)
         {
             var geometry = WetInkGeometryBuilder.Build(
-                session.RealSamples, session.PredictedSamples, session.Style);
+                session.RealSamples, null, session.Style);
 
             var command = new WetInkCommand(
                 session.State == WetInkSessionState.Active
@@ -410,7 +403,7 @@ namespace Ink_Canvas.Ink.WetInk
         private void PostEndStroke(WetInkSession session)
         {
             var geometry = WetInkGeometryBuilder.Build(
-                session.RealSamples, session.PredictedSamples, session.Style);
+                session.RealSamples, null, session.Style);
 
             _mailbox.Post(new WetInkCommand(
                 WetInkCommandKind.EndStroke,
