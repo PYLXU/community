@@ -174,41 +174,60 @@ namespace Ink_Canvas.Ink.WetInk
 
         private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
         {
-            if (msg == WmNcHitTest)
+            try
             {
-                // chrome 排除区域内的输入穿透到主窗口（浮动栏/PPT 导航等必须可点）。
-                // lParam = 屏幕像素；排除矩形 = 屏幕 DIP。
-                var xPx = (short)(lParam.ToInt64() & 0xFFFF);
-                var yPx = (short)((lParam.ToInt64() >> 16) & 0xFFFF);
-                var rects = _exclusionRectsDip;
-                if (rects != null)
+                if (msg == WmNcHitTest)
                 {
-                    var xd = xPx / _dpiScale;
-                    var yd = yPx / _dpiScale;
-                    foreach (var r in rects)
+                    // chrome 排除区域内的输入穿透到主窗口（浮动栏/PPT 导航等必须可点）。
+                    // lParam = 屏幕像素；排除矩形 = 屏幕 DIP。
+                    var xPx = (short)(lParam.ToInt64() & 0xFFFF);
+                    var yPx = (short)((lParam.ToInt64() >> 16) & 0xFFFF);
+                    var rects = _exclusionRectsDip;
+                    if (rects != null)
                     {
-                        if (xd >= r.X && xd <= r.Right && yd >= r.Y && yd <= r.Bottom)
+                        var xd = xPx / _dpiScale;
+                        var yd = yPx / _dpiScale;
+                        foreach (var r in rects)
                         {
-                            handled = true;
-                            return new IntPtr(HtTransparent);
+                            if (xd >= r.X && xd <= r.Right && yd >= r.Y && yd <= r.Bottom)
+                            {
+                                handled = true;
+                                return new IntPtr(HtTransparent);
+                            }
                         }
                     }
+                    return new IntPtr(HtClient);
                 }
-                return new IntPtr(HtClient);
-            }
 
-            if (msg == WmPointerDown || msg == WmPointerUpdate)
-            {
-                if (GetPointerId(wParam, out var pointerId))
+                if (msg == WmPointerDown || msg == WmPointerUpdate)
+                {
+                    var pointerId = GetPointerIdFromWParam(wParam);
                     OnPointerContact(pointerId);
-            }
-            else if (msg == WmPointerUp || msg == WmPointerCaptureChanged)
-            {
-                if (GetPointerId(wParam, out var pointerId))
+                }
+                else if (msg == WmPointerUp || msg == WmPointerCaptureChanged)
+                {
+                    var pointerId = GetPointerIdFromWParam(wParam);
                     ContactUp?.Invoke(pointerId);
+                }
+            }
+            catch (Exception ex)
+            {
+                // WndProc 异常绝不能抛出（会淹没 WPF Dispatcher 导致 UI 无响应/点不了）。
+                Helpers.LogHelper.WriteLogToFile(
+                    $"WetInkHostWindow WndProc 异常: {ex.Message}", Helpers.LogHelper.LogType.Warning);
             }
 
             return IntPtr.Zero;
+        }
+
+        /// <summary>
+        /// GetPointerId 不是 user32.dll 导出函数，而是 winuser.h 的宏
+        /// （GET_POINTERID_WPARAM = LOWORD(wParam)）。必须内联提取，否则
+        /// EntryPointNotFoundException 每次 WM_POINTER 抛一次，淹没 UI 线程。
+        /// </summary>
+        private static uint GetPointerIdFromWParam(IntPtr wParam)
+        {
+            return (uint)(wParam.ToInt64() & 0xFFFF);
         }
 
         private void OnPointerContact(uint pointerId)
@@ -263,9 +282,8 @@ namespace Ink_Canvas.Ink.WetInk
         [DllImport("gdi32.dll")]
         private static extern int CombineRgn(IntPtr dest, IntPtr src1, IntPtr src2, int fnCombineMode);
 
-        [DllImport("user32.dll")]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool GetPointerId(IntPtr wParam, out uint pointerId);
+        // GetPointerId 是宏（GET_POINTERID_WPARAM=LOWORD(wParam)），无 DllImport 导出；已内联为
+        // GetPointerIdFromWParam。GetPointerType / GetPointerTouchInfo 是 user32.dll 真实导出。
 
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
