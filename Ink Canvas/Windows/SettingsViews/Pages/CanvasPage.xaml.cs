@@ -55,6 +55,12 @@ namespace Ink_Canvas.Windows.SettingsViews.Pages
             SliderTouchHelper.AddTouchSupportToAllSliders(this);
         }
 
+        private void ToggleSwitchUseLegacyInkSystem_Toggled(object sender, RoutedEventArgs e)
+        {
+            if (!_isLoaded) return;
+            SettingsManager.SaveSettingsToFile();
+        }
+
         private void LoadBrushAutoRestoreColor(string hex)
         {
             try

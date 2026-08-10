@@ -1542,6 +1542,9 @@ namespace Ink_Canvas
 
             isLoaded = true;
 
+            // 启动新墨迹引擎（WinRT InkPresenter）；初始化失败自动回退旧墨迹路径
+            StartWetInkEngine();
+
             // 应用颜色主题，这将考虑自定义背景色
             CheckColorTheme(true);
             ApplyFloatingBarTheme();
@@ -1660,6 +1663,7 @@ namespace Ink_Canvas
 
         private void SystemEventsOnDisplaySettingsChanged(object sender, EventArgs e)
         {
+            UpdateWetInkTarget(); // 新墨迹引擎：换屏/分辨率变化重定位覆盖窗口
             if (!Settings.Advanced.IsEnableResolutionChangeDetection) return;
             ShowNotification(string.Format(Properties.MainWindowStrings.Main_DisplayChanged, Screen.PrimaryScreen.Bounds.Width, Screen.PrimaryScreen.Bounds.Height));
             HandleFloatingBarRecovery();
@@ -1667,6 +1671,7 @@ namespace Ink_Canvas
 
         private void MainWindow_OnDpiChanged(object sender, DpiChangedEventArgs e)
         {
+            UpdateWetInkTarget(); // 新墨迹引擎：DPI 变化重建覆盖窗口几何
             if (e.OldDpi.DpiScaleX != e.NewDpi.DpiScaleX && e.OldDpi.DpiScaleY != e.NewDpi.DpiScaleY && Settings.Advanced.IsEnableDPIChangeDetection)
             {
                 ShowNotification(string.Format(Properties.MainWindowStrings.Main_DPIChanged, e.OldDpi.DpiScaleX, e.OldDpi.DpiScaleY, e.NewDpi.DpiScaleX, e.NewDpi.DpiScaleY));
@@ -1878,6 +1883,8 @@ namespace Ink_Canvas
                     Screen.PrimaryScreen.Bounds.Width,
                     Screen.PrimaryScreen.Bounds.Height, true);
             }
+
+            UpdateWetInkTarget(); // 新墨迹引擎：尺寸变化重定位覆盖窗口
         }
 
 
@@ -1888,6 +1895,7 @@ namespace Ink_Canvas
         /// <param name="e">关闭事件的参数（未使用）。</param>
         private void Window_Closed(object sender, EventArgs e)
         {
+            ShutdownWetInkEngine(); // 新墨迹引擎：释放覆盖窗口/InkPresenter
             RealtimeInkFrameScheduler.Clear();
             SystemEvents.DisplaySettingsChanged -= SystemEventsOnDisplaySettingsChanged;
             // 玻璃浮动栏刻意不设 Owner，必须显式关闭，否则残留窗口会挡住进程退出
@@ -3309,8 +3317,11 @@ namespace Ink_Canvas
                     DisableEraserOverlay();
                 }
 
-                // 执行模式切换
-                inkCanvas.EditingMode = newMode;
+                // 执行模式切换（新墨迹引擎激活时，笔工具映射为物理 None，由引擎接管输入）
+                if (IsWetInkEngineActive && newMode == InkCanvasEditingMode.Ink)
+                    inkCanvas.EditingMode = InkCanvasEditingMode.None;
+                else
+                    inkCanvas.EditingMode = newMode;
 
                 // 根据模式确定是否为鼠标模式（无工具模式）
                 bool isMouseMode = newMode == InkCanvasEditingMode.None;

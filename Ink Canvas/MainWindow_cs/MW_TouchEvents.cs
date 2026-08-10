@@ -224,6 +224,8 @@ namespace Ink_Canvas
         internal void EnsureRealtimeStylusPipelineBinding()
         {
             if (inkCanvas == null) return;
+            // 新墨迹引擎激活时不再挂多指处理（引擎原生支持多指并发）
+            if (IsWetInkEngineActive) return;
 
             inkCanvas.StylusDown -= MainWindow_StylusDown;
             inkCanvas.StylusMove -= MainWindow_StylusMove;
@@ -1128,6 +1130,7 @@ namespace Ink_Canvas
         /// </remarks>
         private void MainWindow_TouchDown(object sender, TouchEventArgs e)
         {
+            if (IsWetInkEngineActive) return; // 新墨迹引擎（WinRT InkPresenter）接管触摸
             // 视频展台特殊模式：所有触摸交给 VideoPresenterSpecialModeContainer 的 Manipulation 处理，
             // 不进入下面的 EditingMode 切换逻辑（避免把 Ink 切到 None 干扰预览绘制）。
             // 图形绘制模式例外：需要走正常绘制流程
@@ -1188,6 +1191,7 @@ namespace Ink_Canvas
         /// </remarks>
         private void MainWindow_StylusDown(object sender, StylusDownEventArgs e)
         {
+            if (IsWetInkEngineActive) return; // 新墨迹引擎（WinRT InkPresenter）接管笔/触摸
             if (IsTouchStylusDevice(e.StylusDevice))
                 return;
 
@@ -1881,6 +1885,7 @@ namespace Ink_Canvas
         /// </remarks>
         private void InkCanvas_PreviewTouchDown(object sender, TouchEventArgs e)
         {
+            if (IsWetInkEngineActive) return; // 新墨迹引擎（WinRT InkPresenter）接管触摸
             var touchPointForBar = e.GetTouchPoint(this);
             var floatingBarBounds = ViewboxFloatingBar.TransformToAncestor(this).TransformBounds(
                 new Rect(0, 0, ViewboxFloatingBar.ActualWidth, ViewboxFloatingBar.ActualHeight));
@@ -2155,6 +2160,7 @@ namespace Ink_Canvas
         /// </remarks>
         private void InkCanvas_PreviewTouchMove(object sender, TouchEventArgs e)
         {
+            if (IsWetInkEngineActive) return; // 新墨迹引擎（WinRT InkPresenter）接管触摸
             if (isPalmEraserActive)
             {
                 var touchPoint = e.GetTouchPoint(inkCanvas);
@@ -2220,6 +2226,7 @@ namespace Ink_Canvas
         /// </remarks>
         private void InkCanvas_PreviewTouchUp(object sender, TouchEventArgs e)
         {
+            if (IsWetInkEngineActive) return; // 新墨迹引擎（WinRT InkPresenter）接管触摸
             // 视频展台特殊模式：所有手指抬起后恢复用户原本的 EditingMode
             // （PreviewTouchDown 中为了抑制 InkCanvas 内部框选临时切到了 None）
             // 图形绘制模式例外：需要走正常绘制流程完成图形

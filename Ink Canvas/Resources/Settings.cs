@@ -412,6 +412,9 @@ namespace Ink_Canvas
         public bool EnablePalmEraser { get; set; } = true;
         [JsonProperty("palmEraserSensitivity")]
         public int PalmEraserSensitivity { get; set; } = 0; // 0-低敏感度, 1-中敏感度, 2-高敏感度
+        /// <summary>true = 切回旧 WPF InkCanvas 墨迹路径；false = 启用 WinRT InkPresenter 新引擎。重启生效。</summary>
+        [JsonProperty("useLegacyInkSystem")]
+        public bool UseLegacyInkSystem { get; set; } = false;
         [JsonProperty("clearCanvasAlsoClearImages")]
         public bool ClearCanvasAlsoClearImages { get; set; } = true;
         [JsonProperty("showCircleCenter")]

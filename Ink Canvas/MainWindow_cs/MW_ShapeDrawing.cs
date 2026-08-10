@@ -2646,6 +2646,7 @@ namespace Ink_Canvas
         /// </remarks>
         private void inkCanvas_MouseDown(object sender, MouseButtonEventArgs e)
         {
+            if (IsWetInkEngineActive) return; // 新墨迹引擎接管（鼠标经 InputDeviceTypes.Mouse 进 InkPresenter）
             if (IsBoardRoamingMode && e.ChangedButton == MouseButton.Left)
             {
                 inkCanvas.CaptureMouse();
@@ -2690,6 +2691,7 @@ namespace Ink_Canvas
         /// </remarks>
         private void inkCanvas_MouseMove(object sender, MouseEventArgs e)
         {
+            if (IsWetInkEngineActive) return; // 新墨迹引擎接管
             // 视频展台特殊模式：鼠标拖动摄像头预览画面
             if (_isBoothMouseDragging)
             {
@@ -2751,6 +2753,7 @@ namespace Ink_Canvas
         /// </remarks>
         private void inkCanvas_MouseUp(object sender, MouseButtonEventArgs e)
         {
+            if (IsWetInkEngineActive) return; // 新墨迹引擎接管
             // 视频展台特殊模式：结束鼠标拖动
             if (_isBoothMouseDragging)
             {

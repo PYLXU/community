@@ -921,6 +921,8 @@ namespace Ink_Canvas
         private void ToggleSwitchEnableMultiTouchMode_Toggled(object sender, RoutedEventArgs e)
         {
             if (!isLoaded) return;
+            // 新墨迹引擎原生支持多指并发，多指开关在引擎激活时无效
+            if (IsWetInkEngineActive) return;
             var toggle = (iNKORE.UI.WPF.Modern.Controls.ToggleSwitch)sender;
             bool isOn = toggle.IsOn;
             bool isBoardSender = sender == BoardToggleSwitchEnableMultiTouchMode;

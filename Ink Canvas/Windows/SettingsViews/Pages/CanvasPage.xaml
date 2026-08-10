@@ -32,6 +32,18 @@
                     <TextBlock Style="{StaticResource SettingsSectionHeaderTextBlockStyle}"
                         Text="{x:Static props:CanvasStrings.Canvas_GroupTitle}" />
 
+                    <!-- 切回旧墨迹路径：紧急逃生口，放最显眼位置 -->
+                    <ui:SettingsCard x:Name="CardUseLegacyInkSystem"
+                            Header="{x:Static props:CanvasStrings.Canvas_UseLegacyInkSystem}"
+                            Description="{x:Static props:CanvasStrings.Canvas_UseLegacyInkSystemHint}">
+                        <ui:SettingsCard.HeaderIcon>
+                            <ui:FontIcon Icon="{x:Static ui:SegoeFluentIcons.InkingTool}" />
+                        </ui:SettingsCard.HeaderIcon>
+                        <ui:ToggleSwitch x:Name="ToggleSwitchUseLegacyInkSystem"
+                                helpers:SettingsBinder.PropertyPath="Canvas.UseLegacyInkSystem"
+                                Toggled="ToggleSwitchUseLegacyInkSystem_Toggled" />
+                    </ui:SettingsCard>
+
                     <!-- 画笔光标：开关 + 展开后选择系统/内置/自定义光标 -->
                     <ui:SettingsExpander x:Name="ExpanderShowPenCursor"
                             Header="{x:Static props:CanvasStrings.Canvas_ShowPenCursor}"

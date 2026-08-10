@@ -1,0 +1,409 @@
+using System;
+using System.Collections.Generic;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Ink;
+using System.Windows.Interop;
+using Ink_Canvas.Helpers;
+using Ink_Canvas.Ink.WetInk;
+using Ink_Canvas.Properties;
+using global::Windows.UI.Input.Inking;
+
+namespace Ink_Canvas
+{
+    /// <summary>
+    /// 新墨迹引擎（WinRT InkPresenter）集成。
+    ///
+    /// 分层：WetInkHostWindow（覆盖窗口）→ WetInkPresenterBridge（IInkDesktopHost + DComp）
+    /// → WetInkTouchClassifier（四边红外手掌分类）→ WetInkCommitSink（湿→干提交）
+    /// → WetInkRouter（chrome 排除矩形）。
+    ///
+    /// 引擎只在「逻辑笔工具（pen/color）」激活时接管输入：把覆盖窗口定位到画布上方、
+    /// InkPresenter 处理笔/触摸/鼠标，物理 EditingMode 保持 None（防 WPF 内置重复捕获）；
+    /// 其它工具（橡皮/选择/漫游/光标/形状）时覆盖窗口停靠离屏，全部交回 WPF。
+    /// </summary>
+    public partial class MainWindow
+    {
+        /// <summary>新墨迹引擎是否已成功初始化并接管笔输入。</summary>
+        internal static bool IsWetInkEngineActive { get; private set; }
+
+        private WetInkHostWindow _wetInkHostWindow;
+        private WetInkPresenterBridge _wetInkPresenterBridge;
+        private WetInkTouchClassifier _wetInkTouchClassifier;
+        private WetInkCommitSink _wetInkCommitSink;
+        private WetInkRouter _wetInkRouter;
+        private IntPtr _mainWindowHwnd;
+        private bool _wetInkStarted;
+        private bool _wetInkPenToolActive;
+        private bool _wetInkIsShuttingDown;
+
+        // ---------------- 生命周期 ----------------
+
+        /// <summary>启动引擎（应用 Loaded 后调用）。任何初始化失败都回退旧墨迹路径。</summary>
+        internal void StartWetInkEngine()
+        {
+            if (_wetInkStarted || IsWetInkEngineActive) return;
+            // UseLegacyInkSystem=true → 旧 WPF InkCanvas 路径（重启生效后由用户选择）。
+            if (Settings?.Canvas?.UseLegacyInkSystem == true) return;
+            try
+            {
+                _mainWindowHwnd = new WindowInteropHelper(this).Handle;
+                if (_mainWindowHwnd == IntPtr.Zero)
+                    throw new InvalidOperationException("主窗口句柄无效");
+
+                _wetInkHostWindow = new WetInkHostWindow(_mainWindowHwnd);
+
+                _wetInkPresenterBridge = new WetInkPresenterBridge();
+                var dpiScale = GetDpiScale();
+                var initWidthPx = Math.Max(1, (float)(ActualWidth * dpiScale));
+                var initHeightPx = Math.Max(1, (float)(ActualHeight * dpiScale));
+                if (!_wetInkPresenterBridge.Initialize(_wetInkHostWindow.Hwnd, initWidthPx, initHeightPx))
+                    throw new InvalidOperationException("InkPresenter 初始化失败");
+
+                _wetInkTouchClassifier = new WetInkTouchClassifier();
+                _wetInkHostWindow.ContactSample += OnWetInkContactSample;
+                _wetInkHostWindow.ContactUp += OnWetInkContactUp;
+                _wetInkPresenterBridge.StrokesCollected += OnWetInkStrokesCollected;
+
+                _wetInkRouter = new WetInkRouter(
+                    () => ViewboxFloatingBar,
+                    () => IdleMiniBar,
+                    () => ViewboxBlackboardLeftSide,
+                    () => ViewboxBlackboardCenterSide,
+                    () => ViewboxBlackboardRightSide,
+                    () => LeftSidePanelForPPTNavigation,
+                    () => RightSidePanelForPPTNavigation,
+                    () => LeftBottomPanelForPPTNavigation,
+                    () => RightBottomPanelForPPTNavigation);
+
+                _wetInkCommitSink = new WetInkCommitSink(
+                    Dispatcher, _wetInkPresenterBridge, CommitWetInkStrokeToDryLayer);
+
+                _wetInkStarted = true;
+                IsWetInkEngineActive = true;
+
+                LogHelper.WriteLogToFile("新墨迹引擎（WinRT InkPresenter）已启动", LogHelper.LogType.Event);
+                SyncWetInkEngineWithLogicalTool();
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"新墨迹引擎启动失败，回退旧墨迹路径: {ex}", LogHelper.LogType.Error);
+                ShutdownWetInkEngineCore();
+            }
+        }
+
+        /// <summary>关闭引擎并释放资源（窗口关闭时调用）。</summary>
+        internal void ShutdownWetInkEngine()
+        {
+            _wetInkIsShuttingDown = true;
+            ShutdownWetInkEngineCore();
+        }
+
+        private void ShutdownWetInkEngineCore()
+        {
+            if (_wetInkHostWindow != null)
+            {
+                _wetInkHostWindow.ContactSample -= OnWetInkContactSample;
+                _wetInkHostWindow.ContactUp -= OnWetInkContactUp;
+                _wetInkHostWindow.ParkOffscreen();
+                _wetInkHostWindow.Dispose();
+                _wetInkHostWindow = null;
+            }
+
+            if (_wetInkPresenterBridge != null)
+            {
+                _wetInkPresenterBridge.StrokesCollected -= OnWetInkStrokesCollected;
+                _wetInkPresenterBridge.SetInputEnabled(false);
+                _wetInkPresenterBridge.Dispose();
+                _wetInkPresenterBridge = null;
+            }
+
+            _wetInkCommitSink = null;
+            _wetInkRouter = null;
+            _wetInkTouchClassifier = null;
+            _wetInkStarted = false;
+            _wetInkPenToolActive = false;
+            IsWetInkEngineActive = false;
+        }
+
+        /// <summary>按逻辑工具同步引擎：笔工具激活接管，其它工具停靠覆盖窗口。</summary>
+        internal void SyncWetInkEngineWithLogicalTool()
+        {
+            if (!_wetInkStarted || _wetInkIsShuttingDown) return;
+            if (!IsWetInkEngineActive || _wetInkPresenterBridge == null || _wetInkHostWindow == null)
+                return;
+
+            var tool = ResolveWetInkLogicalTool();
+            var penTool = tool == WetInkLogicalTool.Pen && !IsCurrentPageFrozen;
+
+            if (penTool == _wetInkPenToolActive) return;
+
+            _wetInkPenToolActive = penTool;
+
+            if (penTool)
+            {
+                try
+                {
+                    _wetInkPresenterBridge.UpdateDrawingAttributes(BuildWetInkStyleSnapshot());
+                    UpdateWetInkTarget();
+                    _wetInkHostWindow.BringToFront();
+                    _wetInkPresenterBridge.SetInputEnabled(true);
+
+                    if (inkCanvas.EditingMode != InkCanvasEditingMode.None)
+                        inkCanvas.EditingMode = InkCanvasEditingMode.None;
+                }
+                catch (Exception ex)
+                {
+                    LogHelper.WriteLogToFile($"新墨迹引擎激活失败: {ex}", LogHelper.LogType.Error);
+                }
+            }
+            else
+            {
+                _wetInkPresenterBridge.SetInputEnabled(false);
+                _wetInkTouchClassifier.Reset();
+                _wetInkHostWindow.ParkOffscreen();
+            }
+        }
+
+        /// <summary>重定位覆盖窗口 + 重建 chrome 排除区域（尺寸/DPI/换屏时调用）。</summary>
+        internal void UpdateWetInkTarget()
+        {
+            if (!_wetInkStarted || _wetInkIsShuttingDown) return;
+            if (!IsWetInkEngineActive || _wetInkHostWindow == null || _wetInkRouter == null)
+                return;
+
+            // 非笔工具时覆盖窗口必须保持停靠离屏，否则透明窗口会挡住主窗口全部点击。
+            if (!_wetInkPenToolActive)
+            {
+                _wetInkHostWindow.ParkOffscreen();
+                return;
+            }
+
+            try
+            {
+                var dpiScale = GetDpiScale();
+                var clientOrigin = PointToScreen(new Point(0, 0));
+                var exclusionRects = _wetInkRouter.BuildExclusionRects(this);
+
+                _wetInkHostWindow.UpdateTarget(
+                    dpiScale,
+                    clientOrigin.X,
+                    clientOrigin.Y,
+                    ActualWidth,
+                    ActualHeight,
+                    exclusionRects);
+
+                LogHelper.WriteLogToFile(
+                    $"新墨迹引擎覆盖窗口: origin=({clientOrigin.X:0},{clientOrigin.Y:0}) size=({ActualWidth:0}x{ActualHeight:0}) " +
+                    $"排除区={exclusionRects.Count}个" +
+                    (exclusionRects.Count > 0
+                        ? $" 首区=({exclusionRects[0].X:0},{exclusionRects[0].Y:0},{exclusionRects[0].Width:0}x{exclusionRects[0].Height:0})"
+                        : ""),
+                    LogHelper.LogType.Trace);
+
+                _wetInkPresenterBridge?.UpdateTargetSize(
+                    Math.Max(1, (float)(ActualWidth * dpiScale)),
+                    Math.Max(1, (float)(ActualHeight * dpiScale)));
+
+                var inkOrigin = GetInkCanvasOriginInWindowDip();
+                if (_wetInkCommitSink != null)
+                {
+                    _wetInkCommitSink.InkCanvasOffsetXDip = inkOrigin.X;
+                    _wetInkCommitSink.InkCanvasOffsetYDip = inkOrigin.Y;
+                    // InkPresenter 坐标是物理像素(SetSize 用物理 px),干层用 DIP
+                    _wetInkCommitSink.PointsToDipScale = dpiScale > 0 ? 1.0 / dpiScale : 1.0;
+                }
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"新墨迹引擎更新目标失败: {ex.Message}", LogHelper.LogType.Warning);
+            }
+        }
+
+        // ---------------- 逻辑工具 ----------------
+
+        private WetInkLogicalTool ResolveWetInkLogicalTool()
+        {
+            if (IsBoardRoamingMode)
+                return WetInkLogicalTool.BoardRoam;
+            if (drawingShapeMode != 0
+                || string.Equals(_currentToolMode, "shape", StringComparison.OrdinalIgnoreCase))
+                return WetInkLogicalTool.Shape;
+
+            switch (_currentToolMode)
+            {
+                case "pen":
+                case "color":
+                    return WetInkLogicalTool.Pen;
+                case "eraser":
+                    return WetInkLogicalTool.PointEraser;
+                case "eraserByStrokes":
+                    return WetInkLogicalTool.StrokeEraser;
+                case "select":
+                    return WetInkLogicalTool.Select;
+                case "roaming":
+                    return WetInkLogicalTool.BoardRoam;
+                case "cursor":
+                default:
+                    return WetInkLogicalTool.Cursor;
+            }
+        }
+
+        // ---------------- 输入分类 / 手掌擦除 ----------------
+
+        private void OnWetInkContactSample(
+            uint pointerId, bool isTouch, double contactWidthDip, double contactHeightDip, double xDip, double yDip)
+        {
+            if (!IsWetInkEngineActive || !_wetInkPenToolActive) return;
+            if (_wetInkTouchClassifier == null) return;
+
+            try
+            {
+                var policy = BuildWetInkPalmPolicy();
+                var kind = _wetInkTouchClassifier.Classify(
+                    policy, pointerId, isTouch, contactWidthDip, contactHeightDip);
+
+                if (kind == WetInkContactKind.Palm)
+                {
+                    var eraserWidth = _wetInkTouchClassifier.GetPalmEraserWidthDip(
+                        policy, contactWidthDip, contactHeightDip);
+                    EraseDryStrokesUnderPalm(xDip, yDip, eraserWidth);
+                }
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"手掌分类失败: {ex.Message}", LogHelper.LogType.Warning);
+            }
+        }
+
+        private void OnWetInkContactUp(uint pointerId)
+        {
+            _wetInkTouchClassifier?.OnPointerUp(pointerId);
+        }
+
+        /// <summary>手掌擦除：移除与手掌接触矩形相交的干层笔画（TimeMachine 走 StrokesChanged 记录撤销）。</summary>
+        private void EraseDryStrokesUnderPalm(double xDip, double yDip, double eraserWidthDip)
+        {
+            if (inkCanvas == null || inkCanvas.Strokes.Count == 0) return;
+
+            try
+            {
+                var inkOrigin = GetInkCanvasOriginInWindowDip();
+                var center = new Point(xDip - inkOrigin.X, yDip - inkOrigin.Y);
+                var rect = new Rect(
+                    center.X - eraserWidthDip,
+                    center.Y - eraserWidthDip,
+                    eraserWidthDip * 2,
+                    eraserWidthDip * 2);
+
+                var toRemove = new StrokeCollection();
+                foreach (Stroke stroke in inkCanvas.Strokes)
+                {
+                    try
+                    {
+                        if (stroke.GetBounds().IntersectsWith(rect))
+                            toRemove.Add(stroke);
+                    }
+                    catch
+                    {
+                        // 单条笔画边界异常不影响其余笔画。
+                    }
+                }
+
+                if (toRemove.Count > 0)
+                    inkCanvas.Strokes.Remove(toRemove);
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"手掌擦除失败: {ex.Message}", LogHelper.LogType.Warning);
+            }
+        }
+
+        // ---------------- 湿→干提交 ----------------
+
+        private void OnWetInkStrokesCollected(object sender, IReadOnlyList<InkStroke> strokes)
+        {
+            if (!IsWetInkEngineActive) return;
+            _wetInkCommitSink?.OnStrokesCollected(sender, strokes);
+        }
+
+        /// <summary>把 InkPresenter 转好的 WPF Stroke 进干层并复用既有后处理（撤销走 StrokesChanged）。</summary>
+        private void CommitWetInkStrokeToDryLayer(Stroke stroke)
+        {
+            if (inkCanvas == null || stroke == null) return;
+
+            inkCanvas.Strokes.Add(stroke);
+            ProcessCommittedStroke(stroke);
+        }
+
+        // ---------------- 样式 / 手掌策略 / 坐标 ----------------
+
+        /// <summary>当前笔属性（inkCanvas.DefaultDrawingAttributes）→ 引擎样式快照。</summary>
+        private WetInkStyleSnapshot BuildWetInkStyleSnapshot()
+        {
+            var da = inkCanvas.DefaultDrawingAttributes;
+            var winColor = global::Windows.UI.Color.FromArgb(da.Color.A, da.Color.R, da.Color.G, da.Color.B);
+            var penTip = da.StylusTip == StylusTip.Rectangle
+                ? PenTipShape.Rectangle
+                : PenTipShape.Circle;
+
+            return new WetInkStyleSnapshot(
+                winColor,
+                Math.Max(0.1, da.Width),
+                Math.Max(0.1, da.Height),
+                da.FitToCurve,
+                da.IgnorePressure,
+                da.IsHighlighter,
+                penTip);
+        }
+
+        /// <summary>手掌判定策略（与旧 BuildPalmRoutePolicy 公式一致，设置不变）。</summary>
+        private WetInkPalmPolicy BuildWetInkPalmPolicy()
+        {
+            var canvas = Settings.Canvas;
+            var advanced = Settings.Advanced;
+            var isNib = Settings.Startup.IsEnableNibMode;
+
+            double sensitivity;
+            switch (canvas.PalmEraserSensitivity)
+            {
+                case 0:
+                    sensitivity = 3.0;
+                    break;
+                case 1:
+                    sensitivity = 2.5;
+                    break;
+                default:
+                    sensitivity = 2.0;
+                    break;
+            }
+
+            return new WetInkPalmPolicy(
+                enabled: canvas.EnablePalmEraser,
+                isQuadIr: advanced.IsQuadIR,
+                isSpecialScreen: advanced.IsSpecialScreen,
+                boundsWidthDip: BoundsWidth,
+                thresholdFactor: isNib
+                    ? advanced.NibModeBoundsWidthThresholdValue
+                    : advanced.FingerModeBoundsWidthThresholdValue,
+                sensitivityMultiplier: sensitivity,
+                eraserSizeFactor: isNib
+                    ? advanced.NibModeBoundsWidthEraserSize
+                    : advanced.FingerModeBoundsWidthEraserSize,
+                touchMultiplier: advanced.TouchMultiplier);
+        }
+
+        private Point GetInkCanvasOriginInWindowDip()
+        {
+            if (inkCanvas == null) return new Point(0, 0);
+            try
+            {
+                return inkCanvas.TransformToAncestor(this).Transform(new Point(0, 0));
+            }
+            catch
+            {
+                return new Point(0, 0);
+            }
+        }
+    }
+}

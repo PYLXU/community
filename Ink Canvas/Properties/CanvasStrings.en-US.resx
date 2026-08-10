@@ -366,4 +366,13 @@
   <data name="Shape_RemoveAsymptote" xml:space="preserve">
     <value>Remove asymptote lines?</value>
   </data>
+  <data name="Canvas_UseLegacyInkSystem" xml:space="preserve">
+    <value>Use legacy ink system</value>
+  </data>
+  <data name="Canvas_UseLegacyInkSystemHint" xml:space="preserve">
+    <value>ON uses the built-in WPF InkCanvas ink path (multi-touch / palm / IR behavior matches the old version). OFF uses the WinRT InkPresenter engine (Microsoft's official ink stack; multi-touch, palm rejection, and pressure are more reliable). Takes effect after restart.</value>
+  </data>
+  <data name="Canvas_UseLegacyInkSystemRestartNotice" xml:space="preserve">
+    <value>Ink system change will take effect after the application is restarted.</value>
+  </data>
 </root>

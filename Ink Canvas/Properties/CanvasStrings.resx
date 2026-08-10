@@ -366,4 +366,13 @@
   <data name="Shape_RemoveAsymptote" xml:space="preserve">
     <value>是否移除渐近线？</value>
   </data>
+  <data name="Canvas_UseLegacyInkSystem" xml:space="preserve">
+    <value>切回旧墨迹路径</value>
+  </data>
+  <data name="Canvas_UseLegacyInkSystemHint" xml:space="preserve">
+    <value>开启后使用 WPF InkCanvas 内置墨迹路径（多指/手掌/红外行为同旧版）。关闭使用 WinRT InkPresenter 新引擎（微软官方墨迹栈，多指并发/手掌抑制/压感更稳）。重启后生效。</value>
+  </data>
+  <data name="Canvas_UseLegacyInkSystemRestartNotice" xml:space="preserve">
+    <value>墨迹路径设置将在应用重启后生效。</value>
+  </data>
 </root>

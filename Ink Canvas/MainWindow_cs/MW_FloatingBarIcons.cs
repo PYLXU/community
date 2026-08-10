@@ -488,6 +488,9 @@ namespace Ink_Canvas
             // 每次点击或拖动结束后都重新定位高光
             SetFloatingBarHighlightPosition(_currentToolMode);
 
+            // 新墨迹引擎：浮动栏拖动后重建覆盖窗口排除区域，保证浮动栏可点
+            UpdateWetInkTarget();
+
             GridForFloatingBarDraging.Visibility = Visibility.Collapsed;
         }
 
@@ -2752,7 +2755,9 @@ namespace Ink_Canvas
         private void ViewboxFloatingBarMarginAnimationCore(int MarginFromEdge,
             bool PosXCaculatedWithTaskbarHeight = false, bool animate = false)
         {
-            if (Topmost)
+            if (!Topmost)
+                MarginFromEdge = -60;
+            else
             {
                 ViewboxFloatingBar.Visibility = Visibility.Visible;
                 ViewboxFloatingBar.UpdateLayout();
@@ -2784,10 +2789,6 @@ namespace Ink_Canvas
                 screenHeight = screen.Bounds.Height / dpiScaleY;
                 toolbarHeight = ForegroundWindowInfo.GetTaskbarHeight(screen, dpiScaleY);
             }
-
-            // 非置顶时使用 rcWork 获取的任务栏高度，确保浮动栏完全隐藏到屏幕底部以下
-            if (!Topmost)
-                MarginFromEdge = -60 - (int)Math.Round(toolbarHeight);
 
             double baseWidth = ViewboxFloatingBar.ActualWidth;
 
@@ -2874,7 +2875,7 @@ namespace Ink_Canvas
                 }
             }
 
-            if (MarginFromEdge > -60)
+            if (MarginFromEdge != -60)
             {
                 if (!IsVerticalToolbar && QuickColorPalette?.Visibility == Visibility.Visible)
                 {
@@ -6157,6 +6158,9 @@ namespace Ink_Canvas
 
             // 液态玻璃浮动栏：同步选中态高亮
             RefreshLiquidGlassBarActiveState();
+
+            // 新墨迹引擎：按逻辑工具同步接管（笔）或停靠覆盖窗口（其它工具）
+            SyncWetInkEngineWithLogicalTool();
 
             // 通知自动化系统：逻辑工具模式已变化。原生笔路径下物理 EditingMode 不变，
             // 触发器无法靠 EditingModeChanged 感知进/出批注，必须在此显式通知。

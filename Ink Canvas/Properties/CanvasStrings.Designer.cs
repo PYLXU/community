@@ -255,5 +255,11 @@ namespace Ink_Canvas.Properties
         public static string Canvas_DarkMode => ResourceManager.GetString(nameof(Canvas_DarkMode), _resourceCulture);
 
         public static string Shape_RemoveAsymptote => ResourceManager.GetString(nameof(Shape_RemoveAsymptote), _resourceCulture);
+
+        public static string Canvas_UseLegacyInkSystem => ResourceManager.GetString(nameof(Canvas_UseLegacyInkSystem), _resourceCulture);
+
+        public static string Canvas_UseLegacyInkSystemHint => ResourceManager.GetString(nameof(Canvas_UseLegacyInkSystemHint), _resourceCulture);
+
+        public static string Canvas_UseLegacyInkSystemRestartNotice => ResourceManager.GetString(nameof(Canvas_UseLegacyInkSystemRestartNotice), _resourceCulture);
     }
 }
