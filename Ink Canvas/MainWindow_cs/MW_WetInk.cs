@@ -139,6 +139,9 @@ namespace Ink_Canvas
             if (penTool == _wetInkPenToolActive) return;
 
             _wetInkPenToolActive = penTool;
+            LogHelper.WriteLogToFile(
+                $"新墨迹引擎同步工具: {(penTool ? "笔激活" : "笔释放")} mode={_currentToolMode}",
+                LogHelper.LogType.Trace);
 
             if (penTool)
             {
@@ -184,6 +187,22 @@ namespace Ink_Canvas
                 var dpiScale = GetDpiScale();
                 var clientOrigin = PointToScreen(new Point(0, 0));
                 var exclusionRects = _wetInkRouter.BuildExclusionRects(this);
+
+                // 关键：ICC 浮动栏是液态玻璃浮动栏（LiquidGlassBarWindow，独立顶层窗口），
+                // 不在主窗口内。覆盖窗口全屏时也必须避开所有可见的应用窗口，
+                // 否则这些窗口全被透明覆盖层盖住点不到。
+                foreach (Window w in System.Windows.Application.Current.Windows)
+                {
+                    if (w == this || w.Visibility != Visibility.Visible) continue;
+                    try
+                    {
+                        var tl = w.PointToScreen(new Point(0, 0));
+                        var r = new Rect(tl.X, tl.Y, w.ActualWidth, w.ActualHeight);
+                        if (r.Width > 0 && r.Height > 0)
+                            exclusionRects.Add(r);
+                    }
+                    catch { }
+                }
 
                 _wetInkHostWindow.UpdateTarget(
                     dpiScale,
