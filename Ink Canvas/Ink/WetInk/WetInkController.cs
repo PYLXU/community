@@ -16,6 +16,12 @@ namespace Ink_Canvas.Ink.WetInk
         /// <summary>会话已完成湿墨退休（干墨已合成），可清理会话。</summary>
         void OnSessionRetired(long sessionId);
 
+        /// <summary>
+        /// 橡皮擦移动：擦除 inkCanvas 干墨。phase 为 Down/Update/Up。
+        /// 坐标是窗口客户区 DIP；widthDip 为擦除宽度。
+        /// </summary>
+        void OnEraserPoint(long sessionId, WetInkPointerPhase phase, double xDip, double yDip, double eraserWidthDip);
+
         /// <summary>需要路由决策时查询宿主。</summary>
         WetInkRouteDecision QueryDownRoute(
             WetInkPointerBatch batch,
@@ -80,26 +86,26 @@ namespace Ink_Canvas.Ink.WetInk
             _currentStyle = style;
         }
 
-        /// <summary>处理一个输入批。phase 决定 Down/Update/Up/CaptureLost。</summary>
-        public void OnPointerInput(WetInkPointerPhase phase, WetInkPointerBatch batch)
+        /// <summary>处理一个输入批。phase 决定 Down/Update/Up/CaptureLost。
+        /// 返回 true 表示引擎真正接管了该消息（输入源应标记 handled，阻止 WPF 再处理）；
+        /// false 表示引擎不处理（命中 UI 镀铬 / 非写墨工具 / 交还 WPF）。</summary>
+        public bool OnPointerInput(WetInkPointerPhase phase, WetInkPointerBatch batch)
         {
             if (_disposed || batch == null || batch.SamplesNewestFirst.Count == 0)
-                return;
+                return false;
 
             switch (phase)
             {
                 case WetInkPointerPhase.Down:
-                    OnDown(batch);
-                    break;
+                    return OnDown(batch);
                 case WetInkPointerPhase.Update:
-                    OnUpdate(batch);
-                    break;
+                    return OnUpdate(batch);
                 case WetInkPointerPhase.Up:
-                    OnUp(batch);
-                    break;
+                    return OnUp(batch);
                 case WetInkPointerPhase.CaptureLost:
-                    OnCaptureLost(batch);
-                    break;
+                    return OnCaptureLost(batch);
+                default:
+                    return false;
             }
         }
 
@@ -107,14 +113,14 @@ namespace Ink_Canvas.Ink.WetInk
         // down
         // ------------------------------------------------------------------
 
-        private void OnDown(WetInkPointerBatch batch)
+        private bool OnDown(WetInkPointerBatch batch)
         {
             var pointerId = batch.PointerId;
             var sample = batch.SamplesNewestFirst[0];
 
             // 会话续笔：同一设备在容错窗口内重新落笔，继续上一笔。
             if (TryResumeTouchedSession(pointerId, sample))
-                return;
+                return true;
 
             // 已有活动会话：先取消（陈旧会话保护）。
             if (_sessions.TryGetByPointer(pointerId, out var stale))
@@ -128,23 +134,35 @@ namespace Ink_Canvas.Ink.WetInk
             var decision = _sink.QueryDownRoute(batch, contactWidthDip, useFingerMode);
 
             if (!decision.EngineOwnsStroke)
-                return;
+                return false;
 
-            if (decision.Route == WetInkRoute.Ink || decision.Route == WetInkRoute.PointErase)
+            if (decision.Route == WetInkRoute.Ink)
             {
                 var session = _sessions.Begin(
-                    pointerId,
-                    batch.InputKind,
-                    _currentStyle,
-                    decision.Route,
-                    decision.PalmEraserWidthDip);
+                    pointerId, batch.InputKind, _currentStyle, WetInkRoute.Ink, 0);
 
                 _processors[session.SessionId] = CreateProcessor();
                 var processed = _processors[session.SessionId].Process(batch.SamplesNewestFirst);
 
                 session.AppendReal(processed);
                 PostGeometry(session);
+                return true;
             }
+
+            if (decision.Route.IsErase())
+            {
+                var session = _sessions.Begin(
+                    pointerId, batch.InputKind, _currentStyle,
+                    decision.Route, decision.PalmEraserWidthDip);
+
+                var s = batch.SamplesNewestFirst[0];
+                _sink.OnEraserPoint(
+                    session.SessionId, WetInkPointerPhase.Down, s.X, s.Y,
+                    session.PalmEraserWidthDip);
+                return true;
+            }
+
+            return false;
         }
 
         /// <summary>
@@ -174,17 +192,26 @@ namespace Ink_Canvas.Ink.WetInk
         // update / up / capture lost
         // ------------------------------------------------------------------
 
-        private void OnUpdate(WetInkPointerBatch batch)
+        private bool OnUpdate(WetInkPointerBatch batch)
         {
             if (!_sessions.TryGetByPointer(batch.PointerId, out var session))
-                return;
+                return false;
             if (session.State != WetInkSessionState.Active)
-                return;
+                return true; // 引擎仍持有该 pointer（Ending 等），消息不能放回 WPF。
+
+            // 擦除类工具：不下发几何，只按本次样本擦除干墨。
+            if (session.Route.IsErase())
+            {
+                var s = batch.SamplesNewestFirst[0];
+                _sink.OnEraserPoint(session.SessionId, WetInkPointerPhase.Update,
+                    s.X, s.Y, session.PalmEraserWidthDip);
+                return true;
+            }
 
             var processor = GetOrCreateProcessor(session);
             var processed = processor.Process(batch.SamplesNewestFirst);
             if (processed.Count == 0)
-                return;
+                return true; // 引擎持有该 pointer，即使本帧无有效点也标记 handled。
 
             session.AppendReal(processed);
 
@@ -197,12 +224,26 @@ namespace Ink_Canvas.Ink.WetInk
             session.ReplacePrediction(predicted);
 
             PostGeometry(session);
+            return true;
         }
 
-        private void OnUp(WetInkPointerBatch batch)
+        private bool OnUp(WetInkPointerBatch batch)
         {
             if (!_sessions.TryGetByPointer(batch.PointerId, out var session))
-                return;
+                return false;
+
+            if (session.Route.IsErase())
+            {
+                var s = batch.SamplesNewestFirst[0];
+                _sink.OnEraserPoint(session.SessionId, WetInkPointerPhase.Up,
+                    s.X, s.Y, session.PalmEraserWidthDip);
+                _sessions.DetachPointer(batch.PointerId);
+                _processors.Remove(session.SessionId);
+                _lastUpdateMicroseconds.Remove(session.SessionId);
+                _sessions.Remove(session.SessionId);
+                return true;
+            }
+
             if (session.State == WetInkSessionState.Active)
                 session.BeginEnding();
 
@@ -217,7 +258,7 @@ namespace Ink_Canvas.Ink.WetInk
             if (payload.Samples.Length < 2)
             {
                 CancelSession(session);
-                return;
+                return true;
             }
 
             _sink.OnStrokeCompleted(payload);
@@ -225,16 +266,18 @@ namespace Ink_Canvas.Ink.WetInk
             // 湿墨要等干墨合成后才 retire（防烘干闪变），由 sink 经 MainWindow
             // 的 WPF 帧 fence 之后回调 OnWpfFrameRendered。
             PostEndStroke(session);
+            return true;
         }
 
-        private void OnCaptureLost(WetInkPointerBatch batch)
+        private bool OnCaptureLost(WetInkPointerBatch batch)
         {
             if (!_sessions.TryGetByPointer(batch.PointerId, out var session))
-                return;
+                return false;
 
             // 捕获丢失（手势接管/冻结）：取消整笔，不提交。
             CancelSession(session);
             _sessions.DetachPointer(batch.PointerId);
+            return true;
         }
 
         // ------------------------------------------------------------------

@@ -28,7 +28,7 @@ namespace Ink_Canvas
         private WetInkTouchClassifier _wetInkClassifier;
         private WetInkController _wetInkController;
         private WetInkWindowHost _wetInkHost;
-        private WetInkPointerInputSource _wetInkInput;
+        private WetInkWpfInputBridge _wetInkInput;
         private HwndSource _wetInkHwndSource;
 
         private bool _wetInkPipelineActive;
@@ -101,17 +101,22 @@ namespace Ink_Canvas
                     Settings?.Canvas?.PauseStraightenDelay ?? 300);
 
                 _wetInkHwndSource = source;
-                _wetInkInput = new WetInkPointerInputSource(
-                    source,
-                    OnWetInkPointerInput,
-                    () => GetWetInkDpiScales().X,
-                    () => GetWetInkDpiScales().Y);
+                // 输入源：WPF 触笔/触摸事件。四边红外框的输入被 WISPTS 先行消费，
+                // WM_POINTER 常到不了 HWND 钩子，故用 WPF 事件（与希沃同源）作为引擎输入。
+                if (inkCanvas == null)
+                {
+                    ShutdownWetInkPipeline();
+                    return false;
+                }
+                _wetInkInput = new WetInkWpfInputBridge(inkCanvas, OnWetInkPointerInput);
+                _wetInkInput.Wire();
 
                 _wetInkPipelineActive = true;
                 SyncWetInkConfiguration();
                 SyncWetInkWithEditingMode(inkCanvas?.EditingMode ?? InkCanvasEditingMode.Ink);
 
-                LogHelper.WriteLogToFile("新墨迹引擎已挂载（WM_POINTER + D3D11/DirectComposition）");
+                LogHelper.WriteLogToFile(
+                    "新墨迹引擎已挂载（WPF 触笔输入 + D3D11/DirectComposition）");
                 return true;
             }
             catch (Exception ex)
@@ -191,12 +196,19 @@ namespace Ink_Canvas
         // ==================================================================
 
         /// <summary>
-        /// 输入源回调（UI 线程）。只拦截写墨/擦除类工具；
-        /// 选择/图形/漫游/光标一律不拦，交还 WPF 正常处理。
+        /// 输入源回调（UI 线程）。
+        ///
+        /// 路由规则：
+        /// - 仅写墨/擦除类工具且 Down 命中画布表面时，引擎接管整笔（含后续 Update/Up）。
+        /// - 命中 UI 镀铬/画布外、或选择/图形/漫游/光标工具 → 交还 WPF。
+        /// - 续接消息（Update/Up/CaptureLost）不再做命中判断：只要引擎已持有该
+        ///   pointer 就必须转发，否则会话永不结束（抬手后笔画无法提交）。
         /// </summary>
         private bool OnWetInkPointerInput(WetInkPointerPhase phase, WetInkPointerBatch batch)
         {
             if (!IsWetInkPipelineAvailable)
+                return false;
+            if (batch == null || batch.SamplesNewestFirst.Count == 0)
                 return false;
 
             var route = ResolveLogicalTool();
@@ -207,8 +219,20 @@ namespace Ink_Canvas
                 return false;
             }
 
-            _wetInkController?.OnPointerInput(phase, batch);
-            return true;
+            if (phase == WetInkPointerPhase.Down)
+            {
+                // 落笔时才做命中判断：只接管画布表面。
+                var sample = batch.SamplesNewestFirst[0];
+                if (HitTest(sample.X, sample.Y) != WetInkHitZone.CanvasSurface)
+                    return false;
+                return _wetInkController?.OnPointerInput(phase, batch) ?? false;
+            }
+
+            // 续接消息：引擎已持有该 pointer 则必须转发（否则会话泄漏）。
+            if (_wetInkSessions?.TryGetByPointer(batch.PointerId, out _) == true)
+                return _wetInkController?.OnPointerInput(phase, batch) ?? false;
+
+            return false;
         }
 
         /// <summary>更新逻辑笔型与物理 EditingMode 的一致性（引擎挂载时写墨类恒为 None）。</summary>
@@ -342,6 +366,55 @@ namespace Ink_Canvas
             return new WetInkRouteDecision(WetInkRoute.Ink, true, false);
         }
 
+        void IWetInkControllerSink.OnEraserPoint(
+            long sessionId, WetInkPointerPhase phase, double xDip, double yDip, double eraserWidthDip)
+        {
+            // 工具栏橡皮：phase 上游没带 eraserWidthDip，用 Settings.Canvas.EraserSize 翻译。
+            // 手掌擦除：上游已带 eraserWidthDip。
+            // 统一处理：窗口客户区 DIP → inkCanvas 本地，按点擦除（命中范围内整笔移除）。
+            if (inkCanvas == null || inkCanvas.Strokes == null)
+                return;
+
+            var origin = GetWetInkCanvasOrigin();
+            var pt = new Point(xDip - origin.X, yDip - origin.Y);
+            var width = eraserWidthDip > 0
+                ? eraserWidthDip
+                : GetDefaultEraserWidthDip();
+
+            try
+            {
+                // WPF 没有 StrokeCollection.Erase(Point,double)；点擦除 = 遍历笔画，
+                // HitTest 命中则整笔移除。StrokeErase 后续再补 SplitAt 实现。
+                var toRemove = new List<System.Windows.Ink.Stroke>();
+                foreach (var stroke in inkCanvas.Strokes)
+                {
+                    if (stroke == null) continue;
+                    if (stroke.HitTest(pt, Math.Max(2, width)))
+                        toRemove.Add(stroke);
+                }
+                for (var i = 0; i < toRemove.Count; i++)
+                    inkCanvas.Strokes.Remove(toRemove[i]);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[WetInk] eraser: {ex.Message}");
+            }
+        }
+
+        private double GetDefaultEraserWidthDip()
+        {
+            // Settings.Canvas.EraserSize: 0=VerySmall .. 4=VeryLarge。
+            // 映射到像素→DIP 的擦除直径（粗略近似，覆盖典型笔宽范围）。
+            switch (Settings?.Canvas?.EraserSize ?? 2)
+            {
+                case 0: return 16;
+                case 1: return 22;
+                case 2: return 30;
+                case 3: return 40;
+                default: return 52;
+            }
+        }
+
         WetInkRouteContext IWetInkControllerSink.QueryRouteContext()
         {
             return BuildRouteContext();
@@ -425,22 +498,100 @@ namespace Ink_Canvas
 
         WetInkHitZone IWetInkRouteHost.HitTest(double xDip, double yDip) => HitTest(xDip, yDip);
 
+        /// <summary>
+        /// 命中区域判定。
+        ///
+        /// 注意：不能只看最顶层命中结果——inkCanvas 上方叠着若干全画布透明层
+        /// （GridInkCanvasSelectionCover 的 Opacity=0.01 命中陷阱、
+        /// GridTransparencyFakeBackground 等），它们会吃掉每一次命中，
+        /// 导致「永远判成 UI 镀铬 → 引擎不接管 → 物理 EditingMode 又是 None → 谁都不画」。
+        ///
+        /// 因此遍历整条命中链：只要链上存在真正可交互的 UI（浮动栏/白板面板/按钮…）
+        /// 就判 UiChrome；否则只要 inkCanvas 命中即视为画布表面。
+        /// </summary>
         private WetInkHitZone HitTest(double xDip, double yDip)
         {
-            var hit = VisualTreeHelper.HitTest(this, new Point(xDip, yDip));
-            if (hit == null)
+            var point = new Point(xDip, yDip);
+            if (xDip < 0 || yDip < 0 || xDip > ActualWidth || yDip > ActualHeight)
                 return WetInkHitZone.Outside;
 
-            // 结构式判定：命中落在 inkCanvas 之内才是画布表面。
-            var current = hit.VisualHit as DependencyObject;
-            while (current != null)
+            var sawCanvas = false;
+            var sawChrome = false;
+
+            VisualTreeHelper.HitTest(
+                this,
+                null,
+                result =>
+                {
+                    var current = result.VisualHit as DependencyObject;
+                    while (current != null)
+                    {
+                        if (ReferenceEquals(current, inkCanvas))
+                        {
+                            sawCanvas = true;
+                            // 画布已命中：其下方内容与路由无关，停止遍历。
+                            return HitTestResultBehavior.Stop;
+                        }
+
+                        if (IsWetInkInteractiveChrome(current))
+                        {
+                            sawChrome = true;
+                            return HitTestResultBehavior.Stop;
+                        }
+
+                        current = VisualTreeHelper.GetParent(current);
+                    }
+
+                    // 该层与画布/镀铬都无关（透明遮挡层），继续往下找。
+                    return HitTestResultBehavior.Continue;
+                },
+                new PointHitTestParameters(point));
+
+            if (sawChrome)
+                return WetInkHitZone.UiChrome;
+            return sawCanvas ? WetInkHitZone.CanvasSurface : WetInkHitZone.UiChrome;
+        }
+
+        /// <summary>
+        /// 是否为真正需要接收点击的交互式 UI。命名白名单只用于顶层容器；
+        /// 控件类型判定覆盖其内部所有子元素，避免逐个面板维护名单。
+        /// </summary>
+        private static bool IsWetInkInteractiveChrome(DependencyObject element)
+        {
+            if (element is System.Windows.Controls.Primitives.ButtonBase ||
+                element is System.Windows.Controls.Primitives.Thumb ||
+                element is System.Windows.Controls.Primitives.ScrollBar ||
+                element is System.Windows.Controls.Primitives.TextBoxBase ||
+                element is Slider ||
+                element is ComboBox ||
+                element is ListBoxItem)
             {
-                if (ReferenceEquals(current, inkCanvas))
-                    return WetInkHitZone.CanvasSurface;
-                current = VisualTreeHelper.GetParent(current);
+                return true;
             }
 
-            return WetInkHitZone.UiChrome;
+            if (element is FrameworkElement fe && !string.IsNullOrEmpty(fe.Name))
+            {
+                switch (fe.Name)
+                {
+                    case "ViewboxFloatingBar":
+                    case "IdleMiniBar":
+                    case "BlackboardLeftSide":
+                    case "BlackboardCenterSide":
+                    case "BlackboardRightSide":
+                    case "ViewboxBlackboardLeftSide":
+                    case "ViewboxBlackboardCenterSide":
+                    case "ViewboxBlackboardRightSide":
+                    case "BorderPdfPageSidebar":
+                    case "PPTQuickPanelContainer":
+                    case "PPTTimeCapsuleContainer":
+                    case "QuickDrawFloatingButton":
+                    case "EdgeExpandHintPopup":
+                    case "InlineDialogRoot":
+                        return true;
+                }
+            }
+
+            return false;
         }
 
         WetInkRouteContext IWetInkRouteHost.BuildRouteContext() => BuildRouteContext();

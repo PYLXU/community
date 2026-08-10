@@ -25,6 +25,13 @@ namespace Ink_Canvas.Ink.WetInk
         Canceled
     }
 
+    /// <summary>该会话是否走擦除路径（不下发几何，只通知 sink 按点擦除干墨）。</summary>
+    internal static class WetInkRouteExtensions
+    {
+        public static bool IsErase(this WetInkRoute route) =>
+            route == WetInkRoute.PointErase || route == WetInkRoute.StrokeErase;
+    }
+
     /// <summary>
     /// 单笔湿墨会话。累积真实采样 + 预测尾，维护状态机。
     /// 非线程安全：由 WetInkController 在锁内调用。
