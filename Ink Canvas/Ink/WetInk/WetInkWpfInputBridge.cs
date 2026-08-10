@@ -77,12 +77,17 @@ namespace Ink_Canvas.Ink.WetInk
 
         private void OnStylusDown(object sender, StylusDownEventArgs e)
         {
+            // 关键：WISPTS 把触摸也派为 StylusDown(TabletDeviceType.Touch)，
+            // 与 TouchDown 重复。不去重就会一份触摸开两个会话（笔/触摸命名空间不同），
+            // 画一条线被画成两笔重叠 → 「无法书写连续线段」。
+            if (IsTouchDevice(e.StylusDevice)) return;
             DispatchStylus(PenPointerId(e.StylusDevice), WetInkPointerPhase.Down,
                 e.StylusDevice, e.GetStylusPoints(_source), e);
         }
 
         private void OnStylusMove(object sender, StylusEventArgs e)
         {
+            if (IsTouchDevice(e.StylusDevice)) return;
             DispatchStylus(PenPointerId(e.StylusDevice), WetInkPointerPhase.Update,
                 e.StylusDevice, e.GetStylusPoints(_source), e);
         }
@@ -90,6 +95,7 @@ namespace Ink_Canvas.Ink.WetInk
         private void OnStylusUp(object sender, StylusEventArgs e)
         {
             // 兼容不同 WPF 版本：既有 StylusUpEventArgs 也有基类 StylusEventArgs。
+            if (IsTouchDevice(e.StylusDevice)) return;
             DispatchStylus(PenPointerId(e.StylusDevice), WetInkPointerPhase.Up,
                 e.StylusDevice, e.GetStylusPoints(_source), e);
         }
