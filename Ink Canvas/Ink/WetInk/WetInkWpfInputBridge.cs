@@ -75,7 +75,10 @@ namespace Ink_Canvas.Ink.WetInk
 
         private void OnStylusDownRouted(object sender, RoutedEventArgs e)
         {
-            if (e is StylusDownEventArgs sde) OnStylusDown(sender, sde);
+            if (!(e is StylusDownEventArgs sde)) return;
+            Ink_Canvas.Helpers.LogHelper.WriteLogToFile(
+                $"[WetInk] StylusDown id={PenPointerId(sde.StylusDevice)} touch={IsTouchDevice(sde.StylusDevice)}");
+            OnStylusDown(sender, sde);
         }
 
         private void OnStylusMoveRouted(object sender, RoutedEventArgs e)
@@ -200,10 +203,8 @@ namespace Ink_Canvas.Ink.WetInk
 
         private void OnTouchDown(object sender, TouchEventArgs e)
         {
-#if DEBUG
-            System.Diagnostics.Debug.WriteLine(
+            Ink_Canvas.Helpers.LogHelper.WriteLogToFile(
                 $"[WetInk] TouchDown id={TouchPointerId(e.TouchDevice)}");
-#endif
             DispatchTouch(TouchPointerId(e.TouchDevice), WetInkPointerPhase.Down, e.GetTouchPoint(_source));
         }
 
