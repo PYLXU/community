@@ -47,13 +47,15 @@ namespace Ink_Canvas.Ink.WetInk
                 return;
             _wired = true;
 
-            _source.StylusDown += OnStylusDown;
-            _source.StylusMove += OnStylusMove;
-            _source.StylusUp += OnStylusUp;
-            _source.StylusSystemGesture += OnStylusSystemGesture;
-            _source.TouchDown += OnTouchDown;
-            _source.TouchMove += OnTouchMove;
-            _source.TouchUp += OnTouchUp;
+            // AddHandler with handledEventsToo=true：InkPresenter 会把 Stylus/Touch 事件
+            // 标记为 Handled 让内置 InkCanvas 自己画——桥仍需接收以驱动引擎新墨迹路径。
+            _source.AddHandler(Stylus.StylusDownEvent, new RoutedEventHandler(OnStylusDownRouted), handledEventsToo: true);
+            _source.AddHandler(Stylus.StylusMoveEvent, new RoutedEventHandler(OnStylusMoveRouted), handledEventsToo: true);
+            _source.AddHandler(Stylus.StylusUpEvent, new RoutedEventHandler(OnStylusUpRouted), handledEventsToo: true);
+            _source.AddHandler(Stylus.StylusSystemGestureEvent, new RoutedEventHandler(OnStylusSystemGestureRouted));
+            _source.AddHandler(UIElement.TouchDownEvent, new EventHandler<TouchEventArgs>(OnTouchDown), handledEventsToo: true);
+            _source.AddHandler(UIElement.TouchMoveEvent, new EventHandler<TouchEventArgs>(OnTouchMove), handledEventsToo: true);
+            _source.AddHandler(UIElement.TouchUpEvent, new EventHandler<TouchEventArgs>(OnTouchUp), handledEventsToo: true);
         }
 
         public void Unwire()
@@ -62,13 +64,33 @@ namespace Ink_Canvas.Ink.WetInk
                 return;
             _wired = false;
 
-            _source.StylusDown -= OnStylusDown;
-            _source.StylusMove -= OnStylusMove;
-            _source.StylusUp -= OnStylusUp;
-            _source.StylusSystemGesture -= OnStylusSystemGesture;
-            _source.TouchDown -= OnTouchDown;
-            _source.TouchMove -= OnTouchMove;
-            _source.TouchUp -= OnTouchUp;
+            _source.RemoveHandler(Stylus.StylusDownEvent, new RoutedEventHandler(OnStylusDownRouted));
+            _source.RemoveHandler(Stylus.StylusMoveEvent, new RoutedEventHandler(OnStylusMoveRouted));
+            _source.RemoveHandler(Stylus.StylusUpEvent, new RoutedEventHandler(OnStylusUpRouted));
+            _source.RemoveHandler(Stylus.StylusSystemGestureEvent, new RoutedEventHandler(OnStylusSystemGestureRouted));
+            _source.RemoveHandler(UIElement.TouchDownEvent, new EventHandler<TouchEventArgs>(OnTouchDown));
+            _source.RemoveHandler(UIElement.TouchMoveEvent, new EventHandler<TouchEventArgs>(OnTouchMove));
+            _source.RemoveHandler(UIElement.TouchUpEvent, new EventHandler<TouchEventArgs>(OnTouchUp));
+        }
+
+        private void OnStylusDownRouted(object sender, RoutedEventArgs e)
+        {
+            if (e is StylusDownEventArgs sde) OnStylusDown(sender, sde);
+        }
+
+        private void OnStylusMoveRouted(object sender, RoutedEventArgs e)
+        {
+            if (e is StylusEventArgs se) OnStylusMove(sender, se);
+        }
+
+        private void OnStylusUpRouted(object sender, RoutedEventArgs e)
+        {
+            if (e is StylusEventArgs se) OnStylusUp(sender, se);
+        }
+
+        private void OnStylusSystemGestureRouted(object sender, RoutedEventArgs e)
+        {
+            if (e is StylusSystemGestureEventArgs sge) OnStylusSystemGesture(sender, sge);
         }
 
         // ------------------------------------------------------------------
@@ -81,6 +103,10 @@ namespace Ink_Canvas.Ink.WetInk
             // 与 TouchDown 重复。不去重就会一份触摸开两个会话（笔/触摸命名空间不同），
             // 画一条线被画成两笔重叠 → 「无法书写连续线段」。
             if (IsTouchDevice(e.StylusDevice)) return;
+#if DEBUG
+            System.Diagnostics.Debug.WriteLine(
+                $"[WetInk] StylusDown id={PenPointerId(e.StylusDevice)} touch={IsTouchDevice(e.StylusDevice)}");
+#endif
             DispatchStylus(PenPointerId(e.StylusDevice), WetInkPointerPhase.Down,
                 e.StylusDevice, e.GetStylusPoints(_source), e);
         }
@@ -172,8 +198,14 @@ namespace Ink_Canvas.Ink.WetInk
         // touch
         // ------------------------------------------------------------------
 
-        private void OnTouchDown(object sender, TouchEventArgs e) =>
+        private void OnTouchDown(object sender, TouchEventArgs e)
+        {
+#if DEBUG
+            System.Diagnostics.Debug.WriteLine(
+                $"[WetInk] TouchDown id={TouchPointerId(e.TouchDevice)}");
+#endif
             DispatchTouch(TouchPointerId(e.TouchDevice), WetInkPointerPhase.Down, e.GetTouchPoint(_source));
+        }
 
         private void OnTouchMove(object sender, TouchEventArgs e) =>
             DispatchTouch(TouchPointerId(e.TouchDevice), WetInkPointerPhase.Update, e.GetTouchPoint(_source));

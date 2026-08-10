@@ -108,6 +108,12 @@ namespace Ink_Canvas
                     ShutdownWetInkPipeline();
                     return false;
                 }
+                // 订阅到 Window 根 visual（不直接订阅 inkCanvas）：
+                // InkCanvas 内置 InkPresenter 会消费 Stylus 事件并可能不向上冒泡，
+                // 订阅到 RootVisual 保证 bubbling 阶段一定能收到 StylusDown/TouchDown。
+                // 订阅 inkCanvas 但用 AddHandler(handledEventsToo=true)：
+                // InkCanvas 内置 InkPresenter 会消费 Stylus/Touch 事件并标记 e.Handled=true，
+                // 普通 += 订阅收不到。AddHandler + handledEventsToo=true 保证引擎仍能收到。
                 _wetInkInput = new WetInkWpfInputBridge(inkCanvas, OnWetInkPointerInput);
                 _wetInkInput.Wire();
 
