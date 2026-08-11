@@ -142,9 +142,19 @@ namespace Ink_Canvas
         //[DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         //private static extern int SetCurrentProcessExplicitAppUserModelID(string appId);
 
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool EnableMouseInPointer([MarshalAs(UnmanagedType.Bool)] bool fEnable);
+
         public App()
         {
             System.Windows.Forms.Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
+
+            try
+            {
+                EnableMouseInPointer(true);
+            }
+            catch { }
 
             // 注意：此处显式禁用 Switch.System.Windows.Input.Stylus.EnablePointerSupport。
             // 启用该开关会让 WPF 使用 WM_POINTER 触摸栈，导致 DragMove() 和 DoDragDrop()

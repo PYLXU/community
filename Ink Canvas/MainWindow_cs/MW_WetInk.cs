@@ -46,9 +46,14 @@ namespace Ink_Canvas
         {
             if (_wetInkStarted || IsWetInkEngineActive) return;
             // UseLegacyInkSystem=true → 旧 WPF InkCanvas 路径（重启生效后由用户选择）。
-            if (Settings?.Canvas?.UseLegacyInkSystem == true) return;
+            if (Settings?.Canvas?.UseLegacyInkSystem == true)
+            {
+                LogHelper.WriteLogToFile("配置了 UseLegacyInkSystem=true，保持使用传统 WPF InkCanvas 墨迹系统", LogHelper.LogType.Event);
+                return;
+            }
             try
             {
+                LogHelper.WriteLogToFile("正在初始化新墨迹引擎（WinRT InkPresenter）...", LogHelper.LogType.Event);
                 _mainWindowHwnd = new WindowInteropHelper(this).Handle;
                 if (_mainWindowHwnd == IntPtr.Zero)
                     throw new InvalidOperationException("主窗口句柄无效");
@@ -59,6 +64,7 @@ namespace Ink_Canvas
                 var dpiScale = GetDpiScale();
                 var initWidthPx = Math.Max(1, (float)(ActualWidth * dpiScale));
                 var initHeightPx = Math.Max(1, (float)(ActualHeight * dpiScale));
+                LogHelper.WriteLogToFile($"新墨迹覆盖窗口初始尺寸: {ActualWidth}x{ActualHeight} Dip, DPI Scale={dpiScale:F2}", LogHelper.LogType.Event);
                 if (!_wetInkPresenterBridge.Initialize(_wetInkHostWindow.Hwnd, initWidthPx, initHeightPx))
                     throw new InvalidOperationException("InkPresenter 初始化失败");
 
@@ -75,12 +81,12 @@ namespace Ink_Canvas
                 _wetInkStarted = true;
                 IsWetInkEngineActive = true;
 
-                LogHelper.WriteLogToFile("新墨迹引擎（WinRT InkPresenter）已启动", LogHelper.LogType.Event);
+                LogHelper.WriteLogToFile("新墨迹引擎（WinRT InkPresenter）启动成功，已就绪", LogHelper.LogType.Event);
                 SyncWetInkEngineWithLogicalTool();
             }
             catch (Exception ex)
             {
-                LogHelper.WriteLogToFile($"新墨迹引擎启动失败，回退旧墨迹路径: {ex}", LogHelper.LogType.Error);
+                LogHelper.WriteLogToFile($"新墨迹引擎启动失败，触发回退保护退回旧墨迹路径: {ex}", LogHelper.LogType.Error);
                 ShutdownWetInkEngineCore();
             }
         }
@@ -88,6 +94,7 @@ namespace Ink_Canvas
         /// <summary>关闭引擎并释放资源（窗口关闭时调用）。</summary>
         internal void ShutdownWetInkEngine()
         {
+            LogHelper.WriteLogToFile("请求关闭新墨迹引擎...", LogHelper.LogType.Event);
             _wetInkIsShuttingDown = true;
             ShutdownWetInkEngineCore();
         }
@@ -117,6 +124,12 @@ namespace Ink_Canvas
             _wetInkStarted = false;
             _wetInkPenToolActive = false;
             IsWetInkEngineActive = false;
+
+            if (inkCanvas != null && (_currentToolMode == "pen" || _currentToolMode == "color"))
+            {
+                inkCanvas.EditingMode = InkCanvasEditingMode.Ink;
+                LogHelper.WriteLogToFile("新墨迹引擎已关闭，恢复 WPF InkCanvas EditingMode=Ink", LogHelper.LogType.Event);
+            }
         }
 
         /// <summary>按逻辑工具同步引擎：笔工具激活接管，其它工具停靠覆盖窗口。</summary>
@@ -337,6 +350,7 @@ namespace Ink_Canvas
         private void OnWetInkStrokesCollected(object sender, IReadOnlyList<InkStroke> strokes)
         {
             if (!IsWetInkEngineActive) return;
+            LogHelper.WriteLogToFile($"新墨迹引擎收集到湿墨笔画: {strokes?.Count ?? 0} 条", LogHelper.LogType.Trace);
             _wetInkCommitSink?.OnStrokesCollected(sender, strokes);
         }
 
@@ -344,6 +358,9 @@ namespace Ink_Canvas
         private void CommitWetInkStrokeToDryLayer(Stroke stroke)
         {
             if (inkCanvas == null || stroke == null) return;
+
+            var bounds = stroke.GetBounds();
+            LogHelper.WriteLogToFile($"湿墨烘干提交到干层: 点数={stroke.StylusPoints.Count}, 边界=({bounds.X:F0},{bounds.Y:F0},{bounds.Width:F0}x{bounds.Height:F0}), 粗细={stroke.DrawingAttributes.Width:F1}", LogHelper.LogType.Trace);
 
             inkCanvas.Strokes.Add(stroke);
             ProcessCommittedStroke(stroke);

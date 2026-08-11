@@ -142,10 +142,12 @@ namespace Ink_Canvas.Ink.WetInk
         {
             try
             {
+                Helpers.LogHelper.WriteLogToFile($"WetInkPresenterBridge 初始化开始: HWND=0x{overlayHwnd:X}, 物理尺寸={widthPx:F0}x{heightPx:F0}px", Helpers.LogHelper.LogType.Event);
                 CreateDesktopHost();
                 CreateSystemCompositionResources(overlayHwnd);
                 CreatePresenterOnInkThread(Math.Max(1, widthPx), Math.Max(1, heightPx));
                 ConfigurePresenterOnInkThread();
+                Helpers.LogHelper.WriteLogToFile("WetInkPresenterBridge DComp + InkPresenter 硬件渲染层初始化完成", Helpers.LogHelper.LogType.Event);
                 return true;
             }
             catch (Exception ex)
@@ -176,6 +178,7 @@ namespace Ink_Canvas.Ink.WetInk
                     _currentWidthPx = w;
                     _currentHeightPx = h;
                 });
+                Helpers.LogHelper.WriteLogToFile($"WetInkPresenterBridge 更新 DComp 渲染尺寸: {w:F0}x{h:F0}px", Helpers.LogHelper.LogType.Trace);
             }
             catch (Exception ex)
             {
@@ -202,6 +205,9 @@ namespace Ink_Canvas.Ink.WetInk
                         PenTip = style.PenTip
                     };
                     _inkPresenter.UpdateDefaultDrawingAttributes(da);
+                    Helpers.LogHelper.WriteLogToFile(
+                        $"WetInkPresenterBridge 更新笔画属性: Color=#{style.Color.A:X2}{style.Color.R:X2}{style.Color.G:X2}{style.Color.B:X2}, Size={style.Width:F1}x{style.Height:F1}, Highlighter={style.DrawAsHighlighter}",
+                        Helpers.LogHelper.LogType.Trace);
                 }
                 catch (Exception ex)
                 {
@@ -216,7 +222,11 @@ namespace Ink_Canvas.Ink.WetInk
             RunOnInkThreadFireForget(() =>
             {
                 if (_inkPresenter == null) return;
-                try { _inkPresenter.IsInputEnabled = enabled; }
+                try
+                {
+                    _inkPresenter.IsInputEnabled = enabled;
+                    Helpers.LogHelper.WriteLogToFile($"WetInkPresenterBridge 设置 InputEnabled={enabled}", Helpers.LogHelper.LogType.Trace);
+                }
                 catch { /* 忽略 */ }
             });
         }
@@ -238,6 +248,7 @@ namespace Ink_Canvas.Ink.WetInk
                         try { s.Selected = true; } catch { }
                     }
                     _inkPresenter.StrokeContainer.DeleteSelected();
+                    Helpers.LogHelper.WriteLogToFile($"WetInkPresenterBridge 从覆盖层撤掉已烘干湿墨: {strokes.Count} 条", Helpers.LogHelper.LogType.Trace);
                 }
                 catch (Exception ex)
                 {
@@ -258,32 +269,40 @@ namespace Ink_Canvas.Ink.WetInk
             });
         }
 
+                [DllImport("ole32.dll")]
+        private static extern int CoWaitForMultipleHandles(uint dwFlags, uint dwMilliseconds, uint cHandles, IntPtr[] pHandles, out uint lpdwindex);
+
+        private const uint COWAIT_ALERTABLE = 2;
+
         // ---------------- ink 线程投递 ----------------
 
-        /// <summary>投递到 ink 线程并同步等待完成（启动/配置/尺寸路径）。</summary>
+        /// <summary>投递到 ink 线程并同步等待完成（启动/配置/尺寸路径）。使用 CoWaitForMultipleHandles 保持 STA 消息泵避免死锁。</summary>
         private void RunOnInkThreadSync(Action action)
         {
             if (_desktopHost == null) return;
 
-            var done = new System.Threading.ManualResetEventSlim(false);
-            Exception failure = null;
-            _workItem.Enqueue(() =>
+            using (var waitEvent = new System.Threading.EventWaitHandle(false, System.Threading.EventResetMode.AutoReset))
             {
-                try { action(); }
-                catch (Exception ex) { failure = ex; }
-                finally { done.Set(); }
-            });
+                Exception failure = null;
+                _workItem.Enqueue(() =>
+                {
+                    try { action(); }
+                    catch (Exception ex) { failure = ex; }
+                    finally { try { waitEvent.Set(); } catch { } }
+                });
 
-            var hr = _desktopHost.QueueWorkItem(_workItemComPtr);
-            if (hr < 0) Marshal.ThrowExceptionForHR(hr);
+                var hr = _desktopHost.QueueWorkItem(_workItemComPtr);
+                if (hr < 0) Marshal.ThrowExceptionForHR(hr);
 
-            if (!done.Wait(InkThreadOpTimeoutMs))
-            {
-                Helpers.LogHelper.WriteLogToFile(
-                    "WetInkPresenterBridge ink 线程操作超时", Helpers.LogHelper.LogType.Warning);
-                return;
+                var handles = new[] { waitEvent.SafeWaitHandle.DangerousGetHandle() };
+                var waitHr = CoWaitForMultipleHandles(COWAIT_ALERTABLE, (uint)InkThreadOpTimeoutMs, 1, handles, out _);
+                if (waitHr < 0 && waitHr != 0x00000102) // 发生异常时退化为 EventWaitHandle.WaitOne
+                {
+                    waitEvent.WaitOne(InkThreadOpTimeoutMs);
+                }
+
+                if (failure != null) throw failure;
             }
-            if (failure != null) throw failure;
         }
 
         /// <summary>投递到 ink 线程（队列保序，不等完成；用于高频操作）。</summary>
@@ -348,7 +367,7 @@ namespace Ink_Canvas.Ink.WetInk
                 if (hr < 0) Marshal.ThrowExceptionForHR(hr);
 
                 Guid pd = IidIInkPresenterDesktop;
-                Marshal.QueryInterface(ppv, ref pd, out _presenterDesktopPtr);
+                Marshal.QueryInterface(ppv, in pd, out _presenterDesktopPtr);
 
                 var desktop = (IInkPresenterDesktop)Marshal.GetObjectForIUnknown(_presenterDesktopPtr);
                 hr = desktop.SetRootVisual(_visualPtr, IntPtr.Zero);
@@ -444,10 +463,103 @@ namespace Ink_Canvas.Ink.WetInk
         [DllImport("dcomp.dll", ExactSpelling = true)]
         private static extern int DCompositionCreateDevice3(IntPtr dxgiDevice, ref Guid riid, out IntPtr ppv);
 
-        /// <summary>持久 ink 线程工作项：Invoke 在 ink 线程执行队列中的下一个 action。</summary>
-        private sealed class InkHostWorkItem : IInkHostWorkItem
+        [ComImport, Guid("00000003-0000-0000-C000-000000000046")]
+        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        internal interface IMarshal
+        {
+            [PreserveSig] int GetUnmarshalClass(ref Guid riid, IntPtr pv, uint dwDestContext, IntPtr pvDestContext, uint mshlflags, out Guid pCid);
+            [PreserveSig] int GetMarshalSizeMax(ref Guid riid, IntPtr pv, uint dwDestContext, IntPtr pvDestContext, uint mshlflags, out uint pSize);
+            [PreserveSig] int MarshalInterface(IntPtr pStm, ref Guid riid, IntPtr pv, uint dwDestContext, IntPtr pvDestContext, uint mshlflags);
+            [PreserveSig] int UnmarshalInterface(IntPtr pStm, ref Guid riid, out IntPtr ppv);
+            [PreserveSig] int ReleaseMarshalData(IntPtr pStm);
+            [PreserveSig] int DisconnectObject(uint dwReserved);
+        }
+
+        /// <summary>持久 ink 线程工作项：实现 FTM (Free-Threaded Marshaler) 避免 STA 跨线程死锁。</summary>
+        private sealed class InkHostWorkItem : IInkHostWorkItem, IMarshal
         {
             private readonly Queue<Action> _queue = new Queue<Action>();
+            private readonly IntPtr _ftm;
+
+            public InkHostWorkItem()
+            {
+                try
+                {
+                    var selfUnk = Marshal.GetIUnknownForObject(this);
+                    CoCreateFreeThreadedMarshaler(selfUnk, out _ftm);
+                    Marshal.Release(selfUnk);
+                }
+                catch
+                {
+                    _ftm = IntPtr.Zero;
+                }
+            }
+
+            [DllImport("ole32.dll")]
+            private static extern int CoCreateFreeThreadedMarshaler(IntPtr pUnkOuter, out IntPtr ppunkMarshal);
+
+            public int GetUnmarshalClass(ref Guid riid, IntPtr pv, uint dwDestContext, IntPtr pvDestContext, uint mshlflags, out Guid pCid)
+            {
+                if (_ftm != IntPtr.Zero)
+                {
+                    var m = (IMarshal)Marshal.GetObjectForIUnknown(_ftm);
+                    return m.GetUnmarshalClass(ref riid, pv, dwDestContext, pvDestContext, mshlflags, out pCid);
+                }
+                pCid = Guid.Empty;
+                return unchecked((int)0x80004002);
+            }
+
+            public int GetMarshalSizeMax(ref Guid riid, IntPtr pv, uint dwDestContext, IntPtr pvDestContext, uint mshlflags, out uint pSize)
+            {
+                if (_ftm != IntPtr.Zero)
+                {
+                    var m = (IMarshal)Marshal.GetObjectForIUnknown(_ftm);
+                    return m.GetMarshalSizeMax(ref riid, pv, dwDestContext, pvDestContext, mshlflags, out pSize);
+                }
+                pSize = 0;
+                return unchecked((int)0x80004002);
+            }
+
+            public int MarshalInterface(IntPtr pStm, ref Guid riid, IntPtr pv, uint dwDestContext, IntPtr pvDestContext, uint mshlflags)
+            {
+                if (_ftm != IntPtr.Zero)
+                {
+                    var m = (IMarshal)Marshal.GetObjectForIUnknown(_ftm);
+                    return m.MarshalInterface(pStm, ref riid, pv, dwDestContext, pvDestContext, mshlflags);
+                }
+                return unchecked((int)0x80004002);
+            }
+
+            public int UnmarshalInterface(IntPtr pStm, ref Guid riid, out IntPtr ppv)
+            {
+                if (_ftm != IntPtr.Zero)
+                {
+                    var m = (IMarshal)Marshal.GetObjectForIUnknown(_ftm);
+                    return m.UnmarshalInterface(pStm, ref riid, out ppv);
+                }
+                ppv = IntPtr.Zero;
+                return unchecked((int)0x80004002);
+            }
+
+            public int ReleaseMarshalData(IntPtr pStm)
+            {
+                if (_ftm != IntPtr.Zero)
+                {
+                    var m = (IMarshal)Marshal.GetObjectForIUnknown(_ftm);
+                    return m.ReleaseMarshalData(pStm);
+                }
+                return unchecked((int)0x80004002);
+            }
+
+            public int DisconnectObject(uint dwReserved)
+            {
+                if (_ftm != IntPtr.Zero)
+                {
+                    var m = (IMarshal)Marshal.GetObjectForIUnknown(_ftm);
+                    return m.DisconnectObject(dwReserved);
+                }
+                return unchecked((int)0x80004002);
+            }
 
             public void Enqueue(Action action)
             {

@@ -128,6 +128,7 @@ namespace Ink_Canvas.Ink.WetInk
                 frames++;
                 if (frames < DryCompositeFenceFrames) return;
                 CompositionTarget.Rendering -= handler;
+                Helpers.LogHelper.WriteLogToFile($"干墨已完成 {DryCompositeFenceFrames} 帧 WPF 画面合成，通知覆盖层移除湿墨: {strokes.Count} 条", Helpers.LogHelper.LogType.Trace);
                 _bridge.RemoveStrokes(strokes);
             };
             CompositionTarget.Rendering += handler;

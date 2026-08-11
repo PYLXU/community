@@ -111,6 +111,7 @@ namespace Ink_Canvas.Helpers
                 }
                 string logLine = string.Format("{0} [T{1}] [{2}] [{3}] {4}", DateTime.Now.ToString("O"), threadId, strLogType, callerInfo, str);
                 DebugConsoleManager.WriteLine(logLine);
+                System.Diagnostics.Debug.WriteLine(logLine);
                 ProcessProtectionManager.WithWriteAccess(file, () =>
                 {
                     using (StreamWriter sw = new StreamWriter(file, true))
