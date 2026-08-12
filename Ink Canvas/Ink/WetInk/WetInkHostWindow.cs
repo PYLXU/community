@@ -106,7 +106,7 @@ namespace Ink_Canvas.Ink.WetInk
             var widthPx = Math.Max(1, (int)Math.Round(clientWidthDip * dpiScale));
             var heightPx = Math.Max(1, (int)Math.Round(clientHeightDip * dpiScale));
 
-            SetWindowPos(_source.Handle, GetZOrderTargetHwnd(), originXPx, originYPx, widthPx, heightPx,
+            SetWindowPos(_source.Handle, _mainWindowHwnd, originXPx, originYPx, widthPx, heightPx,
                 SwpNoActivate | SwpShowWindow);
 
             SetExclusionRegion(widthPx, heightPx, exclusionRectsDip);
@@ -115,7 +115,7 @@ namespace Ink_Canvas.Ink.WetInk
         public void ParkOffscreen()
         {
             if (_disposed) return;
-            SetWindowPos(_source.Handle, GetZOrderTargetHwnd(), HiddenPosition, HiddenPosition, 1, 1,
+            SetWindowPos(_source.Handle, _mainWindowHwnd, HiddenPosition, HiddenPosition, 1, 1,
                 SwpNoActivate | SwpShowWindow);
             SetWindowRgn(_source.Handle, IntPtr.Zero, true);
         }
@@ -123,21 +123,8 @@ namespace Ink_Canvas.Ink.WetInk
         public void BringToFront()
         {
             if (_disposed) return;
-            SetWindowPos(_source.Handle, GetZOrderTargetHwnd(), 0, 0, 0, 0,
+            SetWindowPos(_source.Handle, _mainWindowHwnd, 0, 0, 0, 0,
                 SwpNoActivate | SwpNoMove | SwpNoSize | SwpShowWindow);
-        }
-
-        private IntPtr GetZOrderTargetHwnd()
-        {
-            try
-            {
-                var exStyle = GetWindowLong(_mainWindowHwnd, GwlExStyle);
-                return (exStyle & WsExTopmost) != 0 ? HwndTopmost : HwndTop;
-            }
-            catch
-            {
-                return HwndTop;
-            }
         }
 
         private void SetExclusionRegion(int widthPx, int heightPx, IReadOnlyList<Rect> exclusionRectsDip)
@@ -274,13 +261,7 @@ namespace Ink_Canvas.Ink.WetInk
             _source.Dispose();
         }
 
-        private static readonly IntPtr HwndTop = IntPtr.Zero;
-        private static readonly IntPtr HwndTopmost = new IntPtr(-1);
-        private const int GwlExStyle = -20;
-        private const int WsExTopmost = 0x00000008;
-
-        [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
-        private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+        // ---- P/Invoke（user32 / gdi32）----
 
         [DllImport("user32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
