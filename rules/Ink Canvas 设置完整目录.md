@@ -238,6 +238,11 @@
 │       ├── LabeledSettingsCard: 重新进入时跳到第一页 → ToggleSwitch
 │       ├── LabeledSettingsCard: 通知隐藏页面 → ToggleSwitch
 │       └── LabeledSettingsCard: 通知自动播放 → ToggleSwitch
+├── UI联动
+│   ├── TextBlock "UI联动"
+│   │   └── LabeledSettingsCard: 启用 UI 联动 → ToggleSwitch
+│   └── TextBlock "应用"
+│       └── LabeledSettingsCard: Microsoft Word → ToggleSwitch
 ├── 更新
 │   ├── 状态横幅（当前版本/更新状态）
 │   └── TabControl

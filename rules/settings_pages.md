@@ -24,6 +24,7 @@
 │   ├── 画布 (CanvasPage)
 │   └── 墨迹识别 (InkRecognitionPage)
 ├── PPT联动 (PowerPointPage)
+├── UI联动 (UILinkagePage)
 ├── 更新 (UpdatePage)
 ├── 通知 (NotificationStrings.DefaultTitle)
 │   ├── 通知设置 (NotificationPage)
@@ -80,6 +81,7 @@
 | Canvas_GroupTitle | 画板设置 / 画布 |
 | InkRecog_Title | 墨迹识别 |
 | PPTStrings.GroupTitle | PPT联动 |
+| UILinkageStrings.GroupTitle | UI联动 |
 | NotificationStrings.Type_Update | 更新 |
 | NotificationStrings.DefaultTitle | 通知 |
 | NotificationStrings.SettingsTitle | 通知设置 |
@@ -137,7 +139,7 @@ _pageTypes = new Dictionary<string, Type>
 - `_pages` — Tag → 页面实例缓存（`NavigateToPage` 时 `Activator.CreateInstance` 创建并缓存，重复导航复用实例）
 - `_pluginPages` — Tag → `PluginInfo`（插件设置页用；`NavigateToPage(tag, pluginInfo)` 会把 `CurrentPlugin` 塞给 `PluginSettingsPage`）
 
-### 完整映射（40 项）
+### 完整映射（41 项）
 
 ```csharp
 // SettingsWindow.xaml.cs 构造函数内，_pageTypes = new Dictionary<string, Type> { ... }
@@ -169,6 +171,7 @@ _pageTypes = new Dictionary<string, Type>
 { "CloudStoragePage", typeof(CloudStoragePage) },
 { "AutomationWorkflowPage", typeof(AutomationWorkflowPage) },
 { "PowerPointPage", typeof(PowerPointPage) },
+{ "UILinkagePage", typeof(UILinkagePage) },
 { "RandomDrawPage", typeof(RandomDrawPage) },
 { "CanvasPage", typeof(CanvasPage) },
 { "InkRecognitionPage", typeof(InkRecognitionPage) },

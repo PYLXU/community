@@ -213,6 +213,9 @@
   <data name="Nav_PPT_Tooltip" xml:space="preserve">
     <value>PPT 联动调教</value>
   </data>
+  <data name="Nav_UILinkage_Tooltip" xml:space="preserve">
+    <value>UI 联动调教</value>
+  </data>
   <data name="Nav_Update_Tooltip" xml:space="preserve">
     <value>更新调教</value>
   </data>

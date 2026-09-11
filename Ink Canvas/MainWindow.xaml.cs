@@ -1524,6 +1524,8 @@ namespace Ink_Canvas
             // 加载设置
             LoadSettings(true);
             LogHelper.WriteLogToFile("[Startup] 设置加载完成", LogHelper.LogType.Info);
+            // UI 联动（Word 页面视口跟踪）轮询
+            EnsureUILinkageTimer();
             // 启动性能监测（如果已启用）。最快模式下延迟到首帧之后。
             // 实时笔迹详细调试日志独立于性能监测，由 Debug 页开关控制，默认关闭。
             if (!App.IsFastestStartupMode)

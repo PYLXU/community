@@ -283,6 +283,17 @@ Title="{x:Static props:NavStrings.Nav_SettingsWindow_Title}"
                     </ui:NavigationViewItem.Icon>
                 </ui:NavigationViewItem>
 
+                <!-- UI联动 -->
+                <ui:NavigationViewItem
+                    x:Name="UILinkagePageItem"
+                    Content="{x:Static props:UILinkageStrings.GroupTitle}"
+                    Tag="UILinkagePage"
+                    ToolTipService.ToolTip="{x:Static props:NavStrings.Nav_UILinkage_Tooltip}">
+                    <ui:NavigationViewItem.Icon>
+                        <ui:FontIcon Icon="{x:Static ui:SegoeFluentIcons.Link}"/>
+                    </ui:NavigationViewItem.Icon>
+                </ui:NavigationViewItem>
+
                 <!-- 更新设置 -->
                 <ui:NavigationViewItem
                     x:Name="UpdatePageItem"

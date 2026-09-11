@@ -73,6 +73,9 @@ namespace Ink_Canvas
 
         [JsonProperty("miniWhiteboard")]
         public MiniWhiteboardSettings MiniWhiteboard { get; set; } = new MiniWhiteboardSettings();
+
+        [JsonProperty("uiLinkage")]
+        public UILinkageSettings UILinkage { get; set; } = new UILinkageSettings();
     }
 
     public class PerformanceSettings
@@ -1905,5 +1908,17 @@ namespace Ink_Canvas
 
         [JsonProperty("currentColorIndex")]
         public int CurrentColorIndex { get; set; } = 0; // 0=White, 1=Black, 2=Red, 3=Orange, 4=Yellow, 5=Green, 6=Blue, 7=Purple
+    }
+
+    public class UILinkageSettings
+    {
+        [JsonProperty("isEnabled")]
+        public bool IsEnabled { get; set; } = false;
+
+        [JsonProperty("wordEnabled")]
+        public bool WordEnabled { get; set; } = false;
+
+        [JsonProperty("isDebugEnabled")]
+        public bool IsDebugEnabled { get; set; } = false;
     }
 }

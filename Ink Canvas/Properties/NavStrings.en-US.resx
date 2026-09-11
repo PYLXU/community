@@ -225,6 +225,9 @@
   <data name="Nav_PPT_Tooltip" xml:space="preserve">
     <value>PPT integration settings</value>
   </data>
+  <data name="Nav_UILinkage_Tooltip" xml:space="preserve">
+    <value>UI integration settings</value>
+  </data>
   <data name="Nav_Update_Tooltip" xml:space="preserve">
     <value>Update settings</value>
   </data>

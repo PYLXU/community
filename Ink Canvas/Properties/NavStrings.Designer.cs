@@ -162,6 +162,8 @@ namespace Ink_Canvas.Properties
 
         public static string Nav_PPT_Tooltip => ResourceManager.GetString(nameof(Nav_PPT_Tooltip), _resourceCulture);
 
+        public static string Nav_UILinkage_Tooltip => ResourceManager.GetString(nameof(Nav_UILinkage_Tooltip), _resourceCulture);
+
         public static string Nav_Update_Tooltip => ResourceManager.GetString(nameof(Nav_Update_Tooltip), _resourceCulture);
 
         public static string Nav_RandomDraw_Tooltip => ResourceManager.GetString(nameof(Nav_RandomDraw_Tooltip), _resourceCulture);

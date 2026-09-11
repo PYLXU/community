@@ -405,6 +405,16 @@ namespace Ink_Canvas
                 LogHelper.WriteLogToFile($"批注点提示判定失败: {ex.Message}", LogHelper.LogType.Warning);
             }
 
+            // UI 联动调试：起始点即采集点，取首点做 UIAutomation 定位。
+            try
+            {
+                HandleUILinkageDebugAfterStroke(e.Stroke);
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"UI联动调试采集失败: {ex.Message}", LogHelper.LogType.Warning);
+            }
+
             if (Settings.Canvas.EnableInkFade)
             {
                 // 获取墨迹的起点和终点

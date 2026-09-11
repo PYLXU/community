@@ -1,0 +1,57 @@
+<ui:Page xmlns:props="clr-namespace:Ink_Canvas.Properties" x:Class="Ink_Canvas.Windows.SettingsViews.Pages.UILinkagePage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+      xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+      xmlns:local="clr-namespace:Ink_Canvas.Windows.SettingsViews.Pages"
+      xmlns:ui="http://schemas.inkore.net/lib/ui/wpf/modern"
+      xmlns:ikw="http://schemas.inkore.net/lib/ui/wpf"
+      xmlns:controls="clr-namespace:Ink_Canvas.Controls;assembly=InkCanvas.Controls"
+      mc:Ignorable="d"
+      Title="{x:Static props:UILinkageStrings.GroupTitle}">
+
+    <ScrollViewer PanningMode="VerticalFirst">
+        <Grid Margin="59,0,59,0">
+            <Grid.Resources>
+                <Style x:Key="SettingsSectionHeaderTextBlockStyle"
+                    BasedOn="{StaticResource BodyStrongTextBlockStyle}"
+                    TargetType="TextBlock">
+                    <Style.Setters>
+                        <Setter Property="Margin" Value="1,30,0,6" />
+                    </Style.Setters>
+                </Style>
+            </Grid.Resources>
+            <Grid>
+                <ikw:SimpleStackPanel MaxWidth="1000"
+                    HorizontalAlignment="Stretch"
+                    Spacing="4">
+
+                    <TextBlock Text="{x:Static props:UILinkageStrings.GroupTitle}" Style="{StaticResource SettingsSectionHeaderTextBlockStyle}"/>
+
+                    <controls:LabeledSettingsCard x:Name="CardUILinkageMaster"
+                            Header="{x:Static props:UILinkageStrings.MasterToggle}"
+                            Description="{x:Static props:UILinkageStrings.MasterToggleHint}"
+                            Icon="{x:Static ui:SegoeFluentIcons.Link}"
+                            Toggled="CardUILinkageMaster_Toggled"/>
+
+                    <TextBlock Text="{x:Static props:UILinkageStrings.ApplicationsGroupHeader}" Style="{StaticResource SettingsSectionHeaderTextBlockStyle}"/>
+
+                    <controls:LabeledSettingsCard x:Name="CardUILinkageWord"
+                            Header="{x:Static props:UILinkageStrings.Word}"
+                            Description="{x:Static props:UILinkageStrings.WordHint}"
+                            Icon="{x:Static ui:SegoeFluentIcons.Document}"
+                            IsEnabled="{Binding IsOn, ElementName=CardUILinkageMaster}"
+                            Toggled="CardUILinkageWord_Toggled"/>
+
+                    <controls:LabeledSettingsCard x:Name="CardUILinkageDebug"
+                            Header="{x:Static props:UILinkageStrings.DebugToggle}"
+                            Description="{x:Static props:UILinkageStrings.DebugToggleHint}"
+                            Icon="{x:Static ui:SegoeFluentIcons.Bug}"
+                            Toggled="CardUILinkageDebug_Toggled"/>
+
+                    <Rectangle Height="48" />
+                </ikw:SimpleStackPanel>
+            </Grid>
+        </Grid>
+    </ScrollViewer>
+</ui:Page>

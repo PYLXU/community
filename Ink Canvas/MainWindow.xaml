@@ -370,6 +370,26 @@
                     Margin="0,0,0,200"
                     Visibility="Collapsed"  d:Visibility="Visible"
                     Panel.ZIndex="1001"/>
+
+            <!-- UI 联动调试面板：叠加在画布层，实时展示 UIAutomation 定位与墨迹采集点信息。 -->
+            <Border x:Name="UILinkageDebugHud"
+                    HorizontalAlignment="Left"
+                    VerticalAlignment="Top"
+                    Margin="16,16,0,0"
+                    Padding="12,10"
+                    CornerRadius="8"
+                    Background="#CC101820"
+                    BorderBrush="#50FFFFFF"
+                    BorderThickness="1"
+                    IsHitTestVisible="False"
+                    Visibility="Collapsed"
+                    Panel.ZIndex="1002">
+                <TextBlock x:Name="UILinkageDebugHudText"
+                           FontFamily="Consolas"
+                           FontSize="12"
+                           Foreground="#F0FFFFFF"
+                           TextWrapping="NoWrap" />
+            </Border>
         </Grid>
         <Canvas x:Name="WhiteboardTipsOverlayCanvas" IsHitTestVisible="False">
             <ikw:SimpleStackPanel Canvas.Left="25" Canvas.Top="15" Orientation="Vertical">
