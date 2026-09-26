@@ -1918,7 +1918,23 @@ namespace Ink_Canvas
         [JsonProperty("wordEnabled")]
         public bool WordEnabled { get; set; } = false;
 
+        /// <summary>SumatraPDF 联动：绑定其文档渲染画布子窗口，滚动读写走 Win32 滚动条。</summary>
+        [JsonProperty("sumatraPdfEnabled")]
+        public bool SumatraPdfEnabled { get; set; } = false;
+
         [JsonProperty("isDebugEnabled")]
         public bool IsDebugEnabled { get; set; } = false;
+
+        /// <summary>自动记忆上次滚动位置（仅当进行过墨迹书写时记录；重新打开文档时恢复）。</summary>
+        [JsonProperty("rememberScrollPosition")]
+        public bool RememberScrollPosition { get; set; } = true;
+
+        /// <summary>自动保存并加载联动画布墨迹（按文档名持久化）。</summary>
+        [JsonProperty("autoSaveInk")]
+        public bool AutoSaveInk { get; set; } = true;
+
+        /// <summary>退出批注/解除绑定时，对带墨迹的区域自动长截屏（顶部/底部各延伸一块，间隔处分多图）。</summary>
+        [JsonProperty("autoLongScreenshot")]
+        public bool AutoLongScreenshot { get; set; } = false;
     }
 }

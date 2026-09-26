@@ -52,8 +52,25 @@ namespace Ink_Canvas.Properties
 
         public static string WordHint => ResourceManager.GetString(nameof(WordHint), _resourceCulture);
 
+        public static string SumatraPdf => ResourceManager.GetString(nameof(SumatraPdf), _resourceCulture);
+
+        public static string SumatraPdfHint => ResourceManager.GetString(nameof(SumatraPdfHint), _resourceCulture);
+
         public static string DebugToggle => ResourceManager.GetString(nameof(DebugToggle), _resourceCulture);
 
         public static string DebugToggleHint => ResourceManager.GetString(nameof(DebugToggleHint), _resourceCulture);
+        public static string AutomationGroupHeader => ResourceManager.GetString(nameof(AutomationGroupHeader), _resourceCulture);
+
+        public static string RememberScrollPosition => ResourceManager.GetString(nameof(RememberScrollPosition), _resourceCulture);
+
+        public static string RememberScrollPositionHint => ResourceManager.GetString(nameof(RememberScrollPositionHint), _resourceCulture);
+
+        public static string AutoSaveInk => ResourceManager.GetString(nameof(AutoSaveInk), _resourceCulture);
+
+        public static string AutoSaveInkHint => ResourceManager.GetString(nameof(AutoSaveInkHint), _resourceCulture);
+
+        public static string AutoLongScreenshot => ResourceManager.GetString(nameof(AutoLongScreenshot), _resourceCulture);
+
+        public static string AutoLongScreenshotHint => ResourceManager.GetString(nameof(AutoLongScreenshotHint), _resourceCulture);
     }
 }

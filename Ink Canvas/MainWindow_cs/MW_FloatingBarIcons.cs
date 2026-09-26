@@ -1233,6 +1233,12 @@ namespace Ink_Canvas
         internal void SymbolIconDelete_MouseUp(object sender, MouseButtonEventArgs e)
         {
             if (TryBlockFrozenPageMutation("清除冻结页面内容")) return;
+
+            // UI 联动：清空所有可见绑定独立画布的视口墨迹（进入其独立撤销历史，可恢复）。
+            foreach (var inst in GetVisibleBoundUILinkageInstances())
+                inst.Canvas.ClearVisibleRegionStrokes();
+
+            // 主画布照常清空（独立画布与主画布一并处理）。
             if (inkCanvas.GetSelectedStrokes().Count > 0)
             {
                 var selectedStrokes = inkCanvas.GetSelectedStrokes();
@@ -3522,6 +3528,9 @@ namespace Ink_Canvas
                 }
                 else CaptureAndEnqueueScreenshotSave(true);
             }
+
+            // UI 联动：退出批注时对独立画布墨迹区域做长截屏存档（设置开启且有墨迹时）。
+            CaptureAllUILinkageLongScreenshots();
 
             // 鼠标工具下如果仍有已选中的图片/SVG，不能把整个 InkCanvas 设为不可命中。
             // 这些元素位于 InkCanvas 的子树中；否则即使元素仍显示、选框仍显示，

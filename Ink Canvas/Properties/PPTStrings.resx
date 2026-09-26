@@ -303,4 +303,7 @@
   <data name="SmartModeHint" xml:space="preserve">
     <value>自动检测 PPT 中的视频控件区域，鼠标进入时切换为指针模式，离开后恢复批注模式</value>
   </data>
+  <data name="LinkageGroupTitle" xml:space="preserve">
+    <value>联动</value>
+  </data>
 </root>

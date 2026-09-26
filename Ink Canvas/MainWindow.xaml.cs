@@ -1970,6 +1970,11 @@ namespace Ink_Canvas
             // 玻璃浮动栏刻意不设 Owner，必须显式关闭，否则残留窗口会挡住进程退出
             HideLiquidGlassBar();
 
+            // UI 联动：关闭前保存所有独立画布实例的墨迹与滚动位置（按文档名持久化）。
+            // 应用即将退出，长截屏无法完成，不在此触发。
+            try { UnbindAllUILinkageCanvases(captureLongScreenshot: false); }
+            catch (Exception ex) { LogHelper.WriteLogToFile($"UI联动墨迹退出保存失败: {ex.Message}", LogHelper.LogType.Warning); }
+
             try
             {
                 PPTTimeCapsule?.Dispose();

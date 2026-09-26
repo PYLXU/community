@@ -1,8 +1,13 @@
-using Ink_Canvas.Controls;
 using Ink_Canvas.Helpers;
 using Ink_Canvas.Windows.SettingsViews.Helpers;
+using Newtonsoft.Json;
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
 using System.Text;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
@@ -13,27 +18,187 @@ using System.Windows.Threading;
 namespace Ink_Canvas
 {
     /// <summary>
-    /// UI 联动：批注模式下，通过 UIAutomation 定位 Word 页面视口，在其上叠加一块
-    /// <see cref="IndependentCanvas"/> 并持续跟踪（位置/宽高 + 滚动）。首个支持 Word。
+    /// UI 联动：进入批注模式书写时，用墨迹「首笔位置」监听批注层后方的窗口。
+    /// <para>
+    /// - 目标为 Word 且开启 Word 联动时：把独立画布绑定到该 Word 窗口的 Document 视口
+    ///   （带边框、带向外延伸的竖直/水平滚动条的独立画布），其墨迹独立于主画布，随 Word
+    ///   滚动平移、随 Word 缩放比例重缩放（缩放读取自状态栏缩放指示）。支持多实例：
+    ///   多个 Word 窗口（多文件分屏）各自拥有独立画布。
+    /// - 目标为 SumatraPDF 且开启 SumatraPDF 联动时：绑定到其文档渲染画布子窗口
+    ///   （SUMATRA_PDF_CANVAS，无 UIA Document/ScrollPattern），滚动读写走 Win32 滚动条
+    ///   （GetScrollInfo + WM_VSCROLL/WM_HSCROLL 反馈闭环）；文件名取自窗口标题。
+    /// - 首笔若落在支持联动的应用上，该笔会从主画布迁入独立画布。
+    /// - 目标为其它元素时：继续监听并在画布层叠加临时高亮边框与调试面板。
+    /// </para>
     /// </summary>
     public partial class MainWindow
     {
-        /// <summary>独立画布在主画布上方的 Z 序（低于橡皮擦反馈层 1000）。</summary>
-        private const int UILinkageCanvasZIndex = 500;
+        /// <summary>组件高亮边框在画布层中的 Z 序（高于墨迹，低于调试面板）。</summary>
+        private const int UILinkageHighlightZIndex = 501;
 
-        private static readonly TimeSpan UILinkagePollInterval = TimeSpan.FromMilliseconds(150);
+        /// <summary>独立画布在画布层中的 Z 序（高于墨迹与高亮边框，用于接收独立批注输入）。</summary>
+        private const int UILinkageCanvasZIndex = 600;
 
-        private IndependentCanvas _uiLinkageCanvas;
+        /// <summary>待迁移首笔缓存上限（绑定完成前连续书写的笔迹最多迁移最近几笔）。</summary>
+        private const int UILinkagePendingStrokeLimit = 8;
+
+        private static readonly TimeSpan UILinkagePollInterval = TimeSpan.FromMilliseconds(250);
+
+        /// <summary>缩放指示元素查找冷却：缓存失效后短时间内不重复做状态栏 UIA 遍历。</summary>
+        private static readonly TimeSpan UILinkageZoomFindCooldown = TimeSpan.FromSeconds(2);
+
+        /// <summary>页面子元素查找冷却：缓存失效后短时间内不重复查找（避免高频 UIA 遍历）。</summary>
+        private static readonly TimeSpan UILinkagePageFindCooldown = TimeSpan.FromSeconds(2);
+
+        /// <summary>同一窗口的节流窗口：短时间内不重复做 UIA 整树遍历。</summary>
+        private static readonly TimeSpan UILinkageCaptureThrottle = TimeSpan.FromMilliseconds(300);
+
         private DispatcherTimer _uiLinkageTimer;
-        private IntPtr _uiLinkageWordTextArea;
 
-        private static bool UILinkageIsEnabled
+        /// <summary>当前捕捉/高亮的目标组件（用于调试高亮、遮挡、上移容器）。</summary>
+        private AutomationElement _uiLinkageCapturedElement;
+
+        /// <summary>捕捉到的批注层后方顶层窗口（用于缩放检测与 Win32 滚动读取）。</summary>
+        private AutomationElement _uiLinkageCapturedWindow;
+
+        /// <summary>捕捉到的批注层后方窗口句柄（用于遮挡计算）。</summary>
+        private IntPtr _uiLinkageCapturedHwnd;
+
+        /// <summary>调试面板是否显示完整组件树。</summary>
+        private bool _uiLinkageShowTree;
+
+        /// <summary>后台计算好的「一键复制/调试面板」信息字符串缓存（避免每 250ms 重新 UIA）。</summary>
+        private string _uiLinkageCachedInfo;
+
+        /// <summary>后台计算好的完整组件树缓存。</summary>
+        private string _uiLinkageCachedTree;
+
+        // ---------------- 独立画布 / Word 绑定（多实例） ----------------
+
+        /// <summary>所有已绑定的独立画布实例（每个 Word 顶层窗口一个）。</summary>
+        private readonly List<UILinkageCanvasInstance> _uiLinkageInstances = new List<UILinkageCanvasInstance>();
+
+        /// <summary>
+        /// 待迁移首笔：触发时的笔画实例可能被收笔后处理（贝塞尔平滑/直线拉直/形状识别）
+        /// 替换为新对象，因此同时记录「触发时刻主画布笔画快照」与「触发首点位置」，
+        /// 迁移时在触发后新增的笔画中解析出替换后的那一笔。
+        /// </summary>
+        private sealed class UILinkagePendingStroke
         {
-            get
-            {
-                var s = SettingsManager.Settings?.UILinkage;
-                return s != null && s.IsEnabled && s.WordEnabled;
-            }
+            public Stroke StrokeReference;
+            public HashSet<Stroke> StrokesAtTrigger;
+            public Point FirstPointInkCanvas;
+            public Point FirstPointScreen;
+        }
+
+        /// <summary>
+        /// 待迁移首笔缓存：绑定完成前落在支持联动应用上的笔迹先留在主画布，
+        /// 绑定完成后迁入独立画布（首笔识别要求）。
+        /// </summary>
+        private readonly List<UILinkagePendingStroke> _uiLinkagePendingStrokes = new List<UILinkagePendingStroke>();
+
+        // ---------------- 节流 ----------------
+
+        private IntPtr _lastCaptureHwnd;
+        private DateTime _lastCaptureTimeUtc = DateTime.MinValue;
+
+        /// <summary>UI 联动目标应用类型（决定视口定位与滚动读写方式）。</summary>
+        internal enum UILinkageTargetKind
+        {
+            Word,
+            SumatraPdf
+        }
+
+        /// <summary>独立画布实例：绑定一个目标应用顶层窗口及其文档视口。</summary>
+        internal sealed class UILinkageCanvasInstance
+        {
+            public Ink_Canvas.Controls.IndependentCanvas Canvas;
+            public IntPtr BoundHwnd;
+            public AutomationElement WindowElement;
+            public AutomationElement DocElement;
+            public Rect ScreenRect = Rect.Empty;
+            public string DocName;
+            public bool Bound;
+
+            /// <summary>联动目标类型（Word / SumatraPDF）。</summary>
+            public UILinkageTargetKind Kind = UILinkageTargetKind.Word;
+
+            /// <summary>SumatraPDF 文档渲染画布子窗口（SUMATRA_PDF_CANVAS）句柄；Word 实例为 Zero。</summary>
+            public IntPtr CanvasHwnd;
+
+            // ---- SumatraPDF 滚动单位校准（端点往返一次标定，窗口尺寸/缩放变化按比例换算） ----
+
+            /// <summary>
+            /// 校准得到的滚动条「单位/视口像素」比（竖直/水平）。SumatraPDF 写入的 nPage 与真实
+            /// 视口单位数存在口径差（随文档/显示模式 1×/2× 不等），以端点停靠位置反推为准；
+            /// 0 = 未校准（退回 nPage 估计）。
+            /// </summary>
+            public double SumatraUnitsPerPxV;
+            public double SumatraUnitsPerPxH;
+
+            // ---- 最近一次 WordSync 读数（滚动记忆 / 长截屏使用，DIP 与百分比） ----
+            public double LastVpPercent = double.NaN;
+            public double LastHpPercent = double.NaN;
+            public double LastViewW;
+            public double LastViewH;
+            public double LastExtW;
+            public double LastExtH;
+            public double LastOffsetX;
+            public double LastOffsetY;
+
+            /// <summary>长截屏进行中：暂停 WordSync 对该实例的滚动同步，避免与截图滚动互相干扰。</summary>
+            public bool IsCapturingLongScreenshot;
+
+            // ---- 缩放支持（状态栏缩放指示 + 墨迹按比例重缩放） ----
+
+            /// <summary>缓存的缩放指示元素（状态栏内）；读取失败后冷却重找。</summary>
+            public AutomationElement ZoomElement;
+
+            /// <summary>缩放指示元素下次允许查找的时间（冷却节流，避免高频 UIA 遍历）。</summary>
+            public DateTime NextZoomFindUtc = DateTime.MinValue;
+
+            /// <summary>最近一次读到的 Word 缩放百分比（NaN = 尚未读到）。</summary>
+            public double LastZoomPercent = double.NaN;
+
+            /// <summary>载入墨迹时按文档记忆的「保存时缩放百分比」（首次读到当前缩放时消费重缩放）。</summary>
+            public double SavedZoomPercent = double.NaN;
+
+            /// <summary>
+            /// 载入的历史墨迹笔迹对象（保存时可能是另一缩放比例）。首次读到当前缩放时
+            /// 只对这批笔迹按比例重缩放，避免误缩放绑定后新写的墨迹。
+            /// </summary>
+            public List<Stroke> LoadedInkStrokes;
+
+            // ---- 横向页面定位（仅 Word；页面化视图居中/贴左的实测基准） ----
+
+            /// <summary>缓存的页面子元素（Word 在 Document 下以 Custom 子元素暴露当前页，如「页面 1」）。</summary>
+            public AutomationElement PageElement;
+
+            /// <summary>页面子元素下次允许查找的时间（冷却节流）。</summary>
+            public DateTime NextPageFindUtc = DateTime.MinValue;
+
+            /// <summary>页面矩形连续读取失败计数（超过阈值才判元素失效重找；瞬时失败沿用上次读数）。</summary>
+            public int PageReadFailureCount;
+
+            /// <summary>最近一次实测的页面左缘视口位移（DIP，NaN = 尚无有效读数）。</summary>
+            public double LastPageLeftDip = double.NaN;
+        }
+
+        /// <summary>按文档持久化的滚动位置（UILinkageInk/<doc>.json）。</summary>
+        private sealed class UILinkageScrollState
+        {
+            [Newtonsoft.Json.JsonProperty("verticalPercent")]
+            public double VerticalPercent { get; set; } = double.NaN;
+
+            [Newtonsoft.Json.JsonProperty("horizontalPercent")]
+            public double HorizontalPercent { get; set; } = double.NaN;
+
+            /// <summary>保存墨迹时的 Word 缩放百分比：载入时按当前缩放/保存缩放重缩放历史墨迹。</summary>
+            [Newtonsoft.Json.JsonProperty("zoomPercent")]
+            public double ZoomPercent { get; set; } = double.NaN;
+
+            [Newtonsoft.Json.JsonProperty("updatedAt")]
+            public string UpdatedAt { get; set; }
         }
 
         private static bool UILinkageIsDebugEnabled
@@ -45,236 +210,440 @@ namespace Ink_Canvas
             }
         }
 
-        /// <summary>最近一次书写起笔采集点（画布 DIP 坐标）；未书写过为 NaN。</summary>
-        private Point _uiLinkageSamplePointDip = new Point(double.NaN, double.NaN);
-        /// <summary>采集点经 UIAutomation 命中的组件描述。</summary>
-        private string _uiLinkageSampleHit = "—";
+        /// <summary>仅当 UI 联动总开关与 Word 开关同时开启时为 true（真正的 Word 联动功能）。</summary>
+        private static bool UILinkageIsWordEnabled
+        {
+            get
+            {
+                var s = SettingsManager.Settings?.UILinkage;
+                return s != null && s.IsEnabled && s.WordEnabled;
+            }
+        }
 
-        /// <summary>启动轮询定时器（Window_Loaded 时调用一次）。</summary>
+        /// <summary>仅当 UI 联动总开关与 SumatraPDF 开关同时开启时为 true。</summary>
+        private static bool UILinkageIsSumatraPdfEnabled
+        {
+            get
+            {
+                var s = SettingsManager.Settings?.UILinkage;
+                return s != null && s.IsEnabled && s.SumatraPdfEnabled;
+            }
+        }
+
+        /// <summary>任一支持联动的应用开关是否开启（首笔缓存等通用逻辑使用）。</summary>
+        private static bool UILinkageHasAnyTargetEnabled => UILinkageIsWordEnabled || UILinkageIsSumatraPdfEnabled;
+
+        /// <summary>捕捉目标是否落在任一已绑定实例的窗口上（调试高亮随之隐藏）。</summary>
+        private bool IsBoundTargetCaptured =>
+            _uiLinkageCapturedHwnd != IntPtr.Zero &&
+            _uiLinkageInstances.Any(i => i.Bound && i.BoundHwnd == _uiLinkageCapturedHwnd);
+
         private void EnsureUILinkageTimer()
         {
             if (_uiLinkageTimer != null) return;
-
             _uiLinkageTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
             {
                 Interval = UILinkagePollInterval
             };
-            _uiLinkageTimer.Tick += (_, _) => UpdateUILinkage();
+            _uiLinkageTimer.Tick += (_, _) =>
+            {
+                SyncUILinkageCanvasState();
+                UpdateUILinkageDebugUi();
+                UpdateUILinkageScrollSync();
+                UpdateUILinkageCanvasGeometry();
+            };
             _uiLinkageTimer.Start();
         }
 
-        private void UpdateUILinkage()
+        /// <summary>轮询刷新调试面板与高亮边框：仅做廉价的位置/信息读取，不做整树遍历。</summary>
+        private void UpdateUILinkageDebugUi()
         {
-            UpdateUILinkageDebugHud();
-
-            bool shouldTrack = UILinkageIsEnabled && IsAnnotationModeActive();
-            if (!shouldTrack)
-            {
-                RemoveUILinkageCanvas();
-                return;
-            }
-
-            if (_uiLinkageCanvas == null) EnsureUILinkageCanvas();
-            if (_uiLinkageCanvas == null) return;
-
-            if (!TryGetWordViewportDip(out var rect))
-            {
-                RemoveUILinkageCanvas();
-                return;
-            }
-
-            PositionUILinkageCanvas(rect);
-            SyncUILinkageScroll(rect.Size);
-        }
-
-        private void EnsureUILinkageCanvas()
-        {
-            if (_uiLinkageCanvas != null || InkCanvasGridForInkReplay == null) return;
-
-            _uiLinkageCanvas = new IndependentCanvas
-            {
-                HorizontalAlignment = HorizontalAlignment.Left,
-                VerticalAlignment = VerticalAlignment.Top,
-                Visibility = Visibility.Visible
-            };
-            Panel.SetZIndex(_uiLinkageCanvas, UILinkageCanvasZIndex);
-
-            // 同步主画布笔触与工具，保证书写观感一致。
-            _uiLinkageCanvas.InkSurface.EditingMode = InkCanvasEditingMode.Ink;
-            if (inkCanvas?.DefaultDrawingAttributes != null)
-                _uiLinkageCanvas.InkSurface.DefaultDrawingAttributes = inkCanvas.DefaultDrawingAttributes.Clone();
-
-            // 滚动条显示设置项（暂用默认值，待接入设置页）。
-            _uiLinkageCanvas.ShowVerticalScrollBar = true;
-            _uiLinkageCanvas.ShowHorizontalScrollBar = true;
-
-            InkCanvasGridForInkReplay.Children.Add(_uiLinkageCanvas);
-        }
-
-        private void RemoveUILinkageCanvas()
-        {
-            _uiLinkageWordTextArea = IntPtr.Zero;
-            if (_uiLinkageCanvas == null) return;
-
-            if (InkCanvasGridForInkReplay != null && InkCanvasGridForInkReplay.Children.Contains(_uiLinkageCanvas))
-                InkCanvasGridForInkReplay.Children.Remove(_uiLinkageCanvas);
-
-            _uiLinkageCanvas = null;
-        }
-
-        private bool TryGetWordViewportDip(out Rect dipRect)
-        {
-            dipRect = default;
-
-            var window = UILinkageHelper.FindWordWindow();
-            var nativeHandle = UILinkageHelper.GetNativeWindowHandle(window);
-            if (nativeHandle == IntPtr.Zero) return false;
-
-            var viewport = UILinkageHelper.FindWordViewport(window);
-            var screenRect = UILinkageHelper.GetScreenRect(viewport);
-            if (screenRect == null) return false;
-
-            var rect = screenRect.Value;
-            if (rect.Width <= 0 || rect.Height <= 0) return false;
-
-            // 缓存 Word 文本区句柄，供滚动读取（失败时下一轮继续尝试）。
-            if (_uiLinkageWordTextArea == IntPtr.Zero)
-                _uiLinkageWordTextArea = UILinkageScrollReader.FindWordTextArea(nativeHandle);
-
-            // 屏幕物理像素 → 窗口 DIP 坐标。
-            var dpi = VisualTreeHelper.GetDpi(this);
-            var topLeft = PointFromScreen(new Point(rect.Left, rect.Top));
-            dipRect = new Rect(
-                topLeft.X,
-                topLeft.Y,
-                rect.Width / dpi.DpiScaleX,
-                rect.Height / dpi.DpiScaleY);
-
-            return true;
-        }
-
-        private void PositionUILinkageCanvas(Rect dipRect)
-        {
-            if (_uiLinkageCanvas == null) return;
-            _uiLinkageCanvas.Margin = new Thickness(dipRect.Left, dipRect.Top, 0, 0);
-            _uiLinkageCanvas.Width = dipRect.Width;
-            _uiLinkageCanvas.Height = dipRect.Height;
-        }
-
-        private void SyncUILinkageScroll(Size viewportDpi)
-        {
-            if (_uiLinkageCanvas == null) return;
-            if (_uiLinkageWordTextArea == IntPtr.Zero) return;
-
-            var offset = new Vector(0, 0);
-            var extent = viewportDpi;
-
-            // 滚动条单位为“行/列”，按视口换算成 DIP 供墨迹平移。比例可后续实机调教。
-            if (UILinkageScrollReader.TryGetScroll(_uiLinkageWordTextArea, UILinkageScrollReader.SB_VERT, out var v))
-            {
-                double scale = v.Page > 0 ? viewportDpi.Height / v.Page : 1.0;
-                offset.Y = v.Pos * scale;
-                extent.Height = viewportDpi.Height + (v.Max - v.Min) * scale;
-            }
-
-            if (UILinkageScrollReader.TryGetScroll(_uiLinkageWordTextArea, UILinkageScrollReader.SB_HORZ, out var h))
-            {
-                double scale = h.Page > 0 ? viewportDpi.Width / h.Page : 1.0;
-                offset.X = h.Pos * scale;
-                extent.Width = viewportDpi.Width + (h.Max - h.Min) * scale;
-            }
-
-            _uiLinkageCanvas.SetScrollInfo(viewportDpi, extent, offset);
-        }
-
-        /// <summary>
-        /// 刷新画布层调试面板（HUD）的可见性与内容。
-        /// 由轮询定时器与墨迹提交路径各自调用，保证信息实时更新。
-        /// </summary>
-        private void UpdateUILinkageDebugHud()
-        {
-            if (UILinkageDebugHud == null || UILinkageDebugHudText == null) return;
+            if (UILinkageDebugHud == null || UILinkageDebugHighlight == null) return;
 
             if (!UILinkageIsDebugEnabled)
             {
                 UILinkageDebugHud.Visibility = Visibility.Collapsed;
+                UILinkageDebugHighlight.Visibility = Visibility.Collapsed;
+                CollapseUILinkageOcclusion();
                 return;
             }
 
             UILinkageDebugHud.Visibility = Visibility.Visible;
-
-            bool wordTracked = UILinkageIsEnabled;
-            bool annotating = IsAnnotationModeActive();
-            bool foundViewport = TryGetWordViewportDip(out var rect);
-
-            var sb = new StringBuilder();
-            sb.AppendLine("UI 联动调试");
-            sb.AppendLine($"Word 联动: {(wordTracked ? "开" : "关")}  批注: {(annotating ? "是" : "否")}");
-
-            if (foundViewport)
-                sb.AppendLine($"视口(DIP): {rect.X:F0},{rect.Y:F0}  {rect.Width:F0}x{rect.Height:F0}");
-            else
-                sb.AppendLine("视口(DIP): 未找到");
-
-            if (!double.IsNaN(_uiLinkageSamplePointDip.X))
-                sb.AppendLine($"采集点(DIP): {_uiLinkageSamplePointDip.X:F0},{_uiLinkageSamplePointDip.Y:F0}");
-            else
-                sb.AppendLine("采集点(DIP): 尚未书写");
-
-            sb.Append($"命中组件: {_uiLinkageSampleHit}");
-
-            UILinkageDebugHudText.Text = sb.ToString();
+            RefreshUILinkageHighlight();
+            RefreshUILinkageOcclusion();
+            RefreshUILinkageHudText();
         }
 
         /// <summary>
-        /// 墨迹提交后处理：起始点即采集点。取 <see cref="Stroke.StylusPoints"/> 首点，
-        /// 换算为屏幕坐标后经 UIAutomation 定位命中的应用组件，并在 HUD 中展示。
+        /// 墨迹提交后处理：首笔位置即采集点，定位批注层后方窗口内命中的组件。
+        /// 只同步做代价极低的 Win32 取窗，昂贵的 UIA 整树遍历放到后台线程。
         /// </summary>
         internal void HandleUILinkageDebugAfterStroke(Stroke stroke)
         {
             try
             {
-                if (!UILinkageIsDebugEnabled) return;
+                if (!UILinkageIsDebugEnabled && !UILinkageHasAnyTargetEnabled) return;
                 if (stroke == null || stroke.StylusPoints.Count == 0) return;
                 if (inkCanvas == null) return;
 
-                var sp = stroke.StylusPoints[0];
-                var canvasPt = new Point(sp.X, sp.Y);
-                _uiLinkageSamplePointDip = canvasPt;
+                var screenPt = inkCanvas.PointToScreen(stroke.StylusPoints[0].ToPoint());
+                var selfHwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
 
-                var screenPt = inkCanvas.PointToScreen(canvasPt);
-                _uiLinkageSampleHit = DescribeElementAtPoint(screenPt);
+                // 已绑定独立画布且首点落在其视口内：由独立画布处理，不视为监听起始。
+                if (AnyUILinkageCanvasContains(screenPt))
+                    return;
 
-                UpdateUILinkageDebugHud();
+                // 快速 Win32：仅取首点后方顶层窗口句柄（避免同步 UIA 整树遍历阻塞 UI）。
+                IntPtr hwnd = UILinkageWindowFinder.FindWindowBehind((int)screenPt.X, (int)screenPt.Y, selfHwnd);
+
+                // 记录待迁移首笔：绑定完成后若落在独立画布视口内则迁入（首笔识别要求）。
+                // 触发时的实例可能被收笔后处理替换，同时记录主画布笔画快照与首点位置。
+                if (UILinkageHasAnyTargetEnabled && hwnd != IntPtr.Zero)
+                {
+                    _uiLinkagePendingStrokes.Add(new UILinkagePendingStroke
+                    {
+                        StrokeReference = stroke,
+                        StrokesAtTrigger = new HashSet<Stroke>(inkCanvas.Strokes),
+                        FirstPointInkCanvas = stroke.StylusPoints[0].ToPoint(),
+                        FirstPointScreen = screenPt
+                    });
+                    while (_uiLinkagePendingStrokes.Count > UILinkagePendingStrokeLimit)
+                        _uiLinkagePendingStrokes.RemoveAt(0);
+                }
+
+                // 节流：同一窗口短时间内不重复遍历。
+                if (hwnd == _lastCaptureHwnd && (DateTime.UtcNow - _lastCaptureTimeUtc) < UILinkageCaptureThrottle)
+                {
+                    _uiLinkageCapturedHwnd = hwnd;
+                    return;
+                }
+                _lastCaptureHwnd = hwnd;
+                _lastCaptureTimeUtc = DateTime.UtcNow;
+                _uiLinkageCapturedHwnd = hwnd;
+
+                if (hwnd == IntPtr.Zero)
+                {
+                    _uiLinkageCapturedWindow = null;
+                    _uiLinkageCapturedElement = null;
+                    _uiLinkageCachedInfo = null;
+                    _uiLinkageCachedTree = null;
+                    RefreshDebugOverlays();
+                    return;
+                }
+
+                var pt = screenPt;
+                var h = hwnd;
+                bool wordEnabled = UILinkageIsWordEnabled;
+                bool sumatraEnabled = UILinkageIsSumatraPdfEnabled;
+                bool showTree = _uiLinkageShowTree;
+
+                Task.Run(() => CaptureOnBackground(h, pt, selfHwnd, wordEnabled, sumatraEnabled, showTree));
             }
             catch (Exception ex)
             {
-                LogHelper.WriteLogToFile($"UI联动采集点定位失败: {ex.Message}", LogHelper.LogType.Warning);
+                LogHelper.WriteLogToFile($"UI联动组件捕捉失败: {ex.Message}", LogHelper.LogType.Warning);
             }
         }
 
-        /// <summary>对屏幕物理像素点做 UIAutomation 命中测试，返回组件简述。</summary>
-        private static string DescribeElementAtPoint(Point screenPt)
+        /// <summary>后台线程：UIA 整树遍历 + 组件定位 + 信息字符串生成，结果经 Dispatcher 回到 UI。</summary>
+        private void CaptureOnBackground(
+            IntPtr hwnd, Point screenPt, IntPtr selfHwnd, bool wordEnabled, bool sumatraEnabled, bool showTree)
         {
             try
             {
-                var el = AutomationElement.FromPoint(screenPt);
-                if (el == null) return "(未命中)";
+                var windowEl = AutomationElement.FromHandle(hwnd);
+                var element = FindDeepestContaining(windowEl, screenPt);
 
-                string type = SafeRead(() => el.Current.ControlType?.ProgrammaticName);
-                string name = SafeRead(() => el.Current.Name);
-                string id = SafeRead(() => el.Current.AutomationId);
-                string cls = SafeRead(() => el.Current.ClassName);
+                bool isWord = wordEnabled && IsWordWindow(windowEl);
+                bool isSumatra = sumatraEnabled && IsSumatraPdfWindow(windowEl);
+                AutomationElement docEl = isWord ? FindDocumentOfWindow(windowEl) : null;
 
-                int dot = type?.LastIndexOf('.') ?? -1;
-                if (dot >= 0 && dot + 1 < type.Length) type = type.Substring(dot + 1);
+                string info = BuildDetailedInfo(element, windowEl);
+                string tree = (showTree && element != null) ? BuildComponentTree(element, 6) : null;
 
-                return $"{type ?? "?"} | {name ?? ""} | #{id ?? ""} | {cls ?? ""}";
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    _uiLinkageCapturedWindow = windowEl;
+                    _uiLinkageCapturedElement = element;
+                    _uiLinkageCapturedHwnd = hwnd;
+                    _uiLinkageCachedInfo = info;
+                    _uiLinkageCachedTree = tree;
+
+                    if (isWord && docEl != null && UILinkageIsWordEnabled)
+                        BindUILinkageCanvas(docEl, hwnd, windowEl, UILinkageTargetKind.Word);
+                    else if (isSumatra && UILinkageIsSumatraPdfEnabled)
+                        BindUILinkageCanvas(null, hwnd, windowEl, UILinkageTargetKind.SumatraPdf);
+
+                    // 关闭的联动目标：解除对应类型实例的绑定（保留仍开启类型的实例）。
+                    if (!UILinkageIsWordEnabled) UnbindUILinkageCanvasesOfKind(UILinkageTargetKind.Word);
+                    if (!UILinkageIsSumatraPdfEnabled) UnbindUILinkageCanvasesOfKind(UILinkageTargetKind.SumatraPdf);
+
+                    // 本轮采集已处理完毕，清掉未迁移的待迁移笔迹（留在主画布）。
+                    _uiLinkagePendingStrokes.Clear();
+
+                    RefreshDebugOverlays();
+                }));
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"UI联动后台采集失败: {ex.Message}", LogHelper.LogType.Warning);
+            }
+        }
+
+        private void RefreshDebugOverlays()
+        {
+            RefreshUILinkageHighlight();
+            RefreshUILinkageOcclusion();
+            RefreshUILinkageHudText();
+        }
+
+        private void RefreshUILinkageHighlight()
+        {
+            if (UILinkageDebugHighlightText == null) return;
+
+            // 绑定到 Word 时不再显示蓝色监听边框。
+            if (IsBoundTargetCaptured)
+            {
+                UILinkageDebugHighlight.Visibility = Visibility.Collapsed;
+                return;
+            }
+
+            var el = _uiLinkageCapturedElement;
+            if (el != null)
+            {
+                try
+                {
+                    var br = el.Current.BoundingRectangle;
+                    if (!br.IsEmpty && br.Width > 0 && br.Height > 0)
+                    {
+                        var dpi = VisualTreeHelper.GetDpi(this);
+                        var topLeft = PointFromScreen(br.TopLeft);
+
+                        UILinkageDebugHighlight.Margin = new Thickness(topLeft.X, topLeft.Y, 0, 0);
+                        UILinkageDebugHighlight.Width = br.Width / dpi.DpiScaleX;
+                        UILinkageDebugHighlight.Height = br.Height / dpi.DpiScaleY;
+                        UILinkageDebugHighlight.Visibility = Visibility.Visible;
+
+                        UILinkageDebugHighlightText.Text =
+                            $"{br.Width:F0}×{br.Height:F0}  @({topLeft.X:F0},{topLeft.Y:F0})  {GetScrollText(el)}";
+                        return;
+                    }
+                }
+                catch (ElementNotAvailableException)
+                {
+                    _uiLinkageCapturedElement = null;
+                }
+                catch
+                {
+                    // 忽略瞬时读取异常，隐藏高亮。
+                }
+            }
+
+            UILinkageDebugHighlight.Visibility = Visibility.Collapsed;
+        }
+
+        private void RefreshUILinkageOcclusion()
+        {
+            if (UILinkageDebugOcclusionLayer == null) return;
+            UILinkageDebugOcclusionLayer.Children.Clear();
+
+            var el = _uiLinkageCapturedElement;
+            if (el == null || _uiLinkageCapturedHwnd == IntPtr.Zero || IsBoundTargetCaptured)
+            {
+                UILinkageDebugOcclusionLayer.Visibility = Visibility.Collapsed;
+                return;
+            }
+
+            try
+            {
+                var br = el.Current.BoundingRectangle;
+                if (br.IsEmpty || br.Width <= 0 || br.Height <= 0)
+                {
+                    UILinkageDebugOcclusionLayer.Visibility = Visibility.Collapsed;
+                    return;
+                }
+
+                var selfHwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+                var occluded = UILinkageWindowFinder.GetOccludedRects(_uiLinkageCapturedHwnd, selfHwnd, br);
+                if (occluded.Count == 0)
+                {
+                    UILinkageDebugOcclusionLayer.Visibility = Visibility.Collapsed;
+                    return;
+                }
+
+                var dpi = VisualTreeHelper.GetDpi(this);
+                foreach (var rect in occluded)
+                {
+                    var topLeft = PointFromScreen(rect.TopLeft);
+                    var frame = new Border
+                    {
+                        BorderBrush = new SolidColorBrush(Color.FromRgb(0xEF, 0x44, 0x44)),
+                        BorderThickness = new Thickness(2),
+                        Width = rect.Width / dpi.DpiScaleX,
+                        Height = rect.Height / dpi.DpiScaleY,
+                        IsHitTestVisible = false,
+                        Background = Brushes.Transparent
+                    };
+                    System.Windows.Controls.Canvas.SetLeft(frame, topLeft.X);
+                    System.Windows.Controls.Canvas.SetTop(frame, topLeft.Y);
+                    UILinkageDebugOcclusionLayer.Children.Add(frame);
+                }
+
+                UILinkageDebugOcclusionLayer.Visibility = Visibility.Visible;
+            }
+            catch (ElementNotAvailableException)
+            {
+                _uiLinkageCapturedElement = null;
+                UILinkageDebugOcclusionLayer.Visibility = Visibility.Collapsed;
             }
             catch
             {
-                return "(定位失败)";
+                UILinkageDebugOcclusionLayer.Visibility = Visibility.Collapsed;
             }
+        }
+
+        private void CollapseUILinkageOcclusion()
+        {
+            if (UILinkageDebugOcclusionLayer == null) return;
+            UILinkageDebugOcclusionLayer.Children.Clear();
+            UILinkageDebugOcclusionLayer.Visibility = Visibility.Collapsed;
+        }
+
+        private void RefreshUILinkageHudText()
+        {
+            if (UILinkageDebugHudText == null) return;
+
+            var sb = new StringBuilder();
+            sb.Append(string.IsNullOrEmpty(_uiLinkageCachedInfo)
+                ? "（尚未捕捉组件，请在批注层书写后采样）"
+                : _uiLinkageCachedInfo);
+
+            if (_uiLinkageShowTree && _uiLinkageCachedTree != null)
+            {
+                sb.AppendLine();
+                sb.AppendLine("=== 完整组件树 ===");
+                sb.Append(_uiLinkageCachedTree);
+            }
+
+            UILinkageDebugHudText.Text = sb.ToString();
+        }
+
+        /// <summary>沿祖先链查找首个支持 <see cref="ScrollPattern"/> 的元素并返回滚动位置描述。</summary>
+        private static string GetScrollText(AutomationElement el)
+        {
+            var current = el;
+            int guard = 0;
+            while (current != null && guard++ < 32)
+            {
+                try
+                {
+                    if (current.TryGetCurrentPattern(ScrollPattern.Pattern, out var p) && p is ScrollPattern sp)
+                    {
+                        double h = sp.Current.HorizontalScrollPercent;
+                        double v = sp.Current.VerticalScrollPercent;
+                        if (double.IsNaN(h)) h = -1;
+                        if (double.IsNaN(v)) v = -1;
+                        return $"滚动 H:{h:F0}% V:{v:F0}%";
+                    }
+                }
+                catch (ElementNotAvailableException)
+                {
+                    break;
+                }
+                catch
+                {
+                    // 继续向上查找。
+                }
+
+                current = TreeWalker.ControlViewWalker.GetParent(current);
+            }
+
+            return "滚动 —";
+        }
+
+        private static string BuildComponentTree(AutomationElement root, int maxDepth)
+        {
+            var sb = new StringBuilder();
+            int budget = 300;
+            AppendNode(sb, TreeWalker.ControlViewWalker, root, 0, maxDepth, ref budget);
+            return sb.ToString();
+        }
+
+        private static void AppendNode(
+            StringBuilder sb, TreeWalker walker, AutomationElement el, int depth, int maxDepth, ref int budget)
+        {
+            if (el == null || depth > maxDepth || budget <= 0) return;
+
+            try
+            {
+                budget--;
+                string type = el.Current.ControlType?.ProgrammaticName ?? "?";
+                int dot = type.LastIndexOf('.');
+                if (dot >= 0 && dot + 1 < type.Length) type = type.Substring(dot + 1);
+                string name = el.Current.Name ?? "";
+                sb.AppendLine(new string(' ', depth * 2) + $"[{type}] {name}");
+            }
+            catch (ElementNotAvailableException)
+            {
+                return;
+            }
+            catch
+            {
+                return;
+            }
+
+            var child = walker.GetFirstChild(el);
+            while (child != null && budget > 0)
+            {
+                AppendNode(sb, walker, child, depth + 1, maxDepth, ref budget);
+                child = walker.GetNextSibling(child);
+            }
+        }
+
+        /// <summary>在目标窗口 UIA 树中查找包含给定屏幕点的最深层组件（仅后台线程调用）。</summary>
+        private static AutomationElement FindDeepestContaining(AutomationElement root, Point screenPt)
+        {
+            if (root == null) return null;
+
+            var walker = TreeWalker.ControlViewWalker;
+            var best = root;
+            var stack = new Stack<AutomationElement>();
+
+            var child = walker.GetFirstChild(root);
+            while (child != null)
+            {
+                stack.Push(child);
+                child = walker.GetNextSibling(child);
+            }
+
+            while (stack.Count > 0)
+            {
+                var el = stack.Pop();
+                try
+                {
+                    var br = el.Current.BoundingRectangle;
+                    if (!br.IsEmpty && br.Contains(screenPt))
+                    {
+                        best = el;
+                        var c = walker.GetFirstChild(el);
+                        while (c != null)
+                        {
+                            stack.Push(c);
+                            c = walker.GetNextSibling(c);
+                        }
+                    }
+                }
+                catch (ElementNotAvailableException)
+                {
+                    // 组件可能刚被移除，跳过。
+                }
+                catch
+                {
+                    // 忽略单个元素异常，继续。
+                }
+            }
+
+            return best;
         }
 
         private static string SafeRead(Func<string> read)
@@ -282,5 +651,2155 @@ namespace Ink_Canvas
             try { return read(); }
             catch { return null; }
         }
+
+        private void UILinkageMoveUp_Click(object sender, RoutedEventArgs e)
+        {
+            if (_uiLinkageCapturedElement == null) return;
+            try
+            {
+                var parent = TreeWalker.ControlViewWalker.GetParent(_uiLinkageCapturedElement);
+                if (parent != null && parent != AutomationElement.RootElement)
+                    _uiLinkageCapturedElement = parent;
+            }
+            catch (ElementNotAvailableException)
+            {
+                _uiLinkageCapturedElement = null;
+            }
+
+            RecomputeUILinkageCaches();
+            RefreshUILinkageHighlight();
+            RefreshUILinkageHudText();
+        }
+
+        private void UILinkageShowTree_Changed(object sender, RoutedEventArgs e)
+        {
+            _uiLinkageShowTree = UILinkageShowTreeCheck?.IsChecked == true;
+            if (_uiLinkageShowTree && _uiLinkageCapturedElement != null)
+                _uiLinkageCachedTree = BuildComponentTree(_uiLinkageCapturedElement, 6);
+            RefreshUILinkageHudText();
+        }
+
+        private void UILinkageCopy_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                Clipboard.SetText(BuildDetailedInfo(_uiLinkageCapturedElement, _uiLinkageCapturedWindow));
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"UI联动复制信息失败: {ex.Message}", LogHelper.LogType.Warning);
+            }
+        }
+
+        private void RecomputeUILinkageCaches()
+        {
+            if (_uiLinkageCapturedElement == null)
+            {
+                _uiLinkageCachedInfo = null;
+                _uiLinkageCachedTree = null;
+                return;
+            }
+
+            _uiLinkageCachedInfo = BuildDetailedInfo(_uiLinkageCapturedElement, _uiLinkageCapturedWindow);
+            _uiLinkageCachedTree = _uiLinkageShowTree ? BuildComponentTree(_uiLinkageCapturedElement, 6) : null;
+        }
+
+        private static string BuildDetailedInfo(AutomationElement el, AutomationElement windowEl)
+        {
+            if (el == null)
+                return "（尚未捕捉组件，请在批注层书写后采样）";
+
+            var sb = new StringBuilder();
+            sb.AppendLine("=== UI 联动采样信息 ===");
+
+            // 1) 祖先链（Document → Custom → Edit），附屏幕物理像素 Rect。
+            var chain = new List<AutomationElement>();
+            var cur = el;
+            int guard = 0;
+            while (cur != null && guard++ < 40)
+            {
+                chain.Add(cur);
+                cur = TreeWalker.ControlViewWalker.GetParent(cur);
+            }
+
+            AutomationElement docEl = null, customEl = null, editEl = null;
+            sb.AppendLine("[组件祖先链]");
+            for (int i = 0; i < chain.Count; i++)
+            {
+                var c = chain[i];
+                string type = ShortType(c);
+                string name = SafeRead(() => c.Current.Name) ?? "";
+                if (docEl == null && type == "Document") docEl = c;
+                if (customEl == null && type == "Custom") customEl = c;
+                if (editEl == null && type == "Edit") editEl = c;
+                var r = SafeRect(c);
+                sb.AppendLine(new string(' ', i * 2) + $"[{type}] {name}  Rect=({r.X:F0},{r.Y:F0},{r.Width:F0},{r.Height:F0})");
+            }
+
+            sb.AppendLine($"[结构判定] Document={(docEl != null ? "是" : "否")} Custom={(customEl != null ? "是" : "否")} Edit={(editEl != null ? "是" : "否")}");
+
+            // 2) Document 视口 ScrollPattern 与总尺寸估算。
+            if (docEl != null)
+                AppendViewportInfo(sb, docEl);
+            else
+                sb.AppendLine("[视口] 祖先链中未找到 Document 组件");
+
+            // 3) Word 文本区（_WwG）滚动行信息。
+            AppendWordScrollInfo(sb, windowEl);
+
+            // 3.5) SumatraPDF 画布滚动信息（仅 SumatraPDF 窗口输出）。
+            AppendSumatraScrollInfo(sb, windowEl);
+
+            // 4) 视口缩放（状态栏百分比指示，尽力检测）。
+            sb.AppendLine($"[视口缩放] {DetectZoom(windowEl)}");
+
+            return sb.ToString();
+        }
+
+        private static void AppendViewportInfo(StringBuilder sb, AutomationElement docEl)
+        {
+            var r = SafeRect(docEl);
+            sb.AppendLine($"[Document 视口 Rect] ({r.X:F0},{r.Y:F0},{r.Width:F0},{r.Height:F0})");
+
+            try
+            {
+                if (docEl.TryGetCurrentPattern(ScrollPattern.Pattern, out var p) && p is ScrollPattern sp)
+                {
+                    string Fmt(double v) => (double.IsNaN(v) || v < 0) ? "—" : v.ToString("F0");
+                    double hs = sp.Current.HorizontalViewSize;
+                    double vs = sp.Current.VerticalViewSize;
+                    double hp = sp.Current.HorizontalScrollPercent;
+                    double vp = sp.Current.VerticalScrollPercent;
+
+                    sb.AppendLine($"[视口 ViewSize] H:{Fmt(hs)}% V:{Fmt(vs)}%");
+                    sb.AppendLine($"[视口 滚动位置] H:{Fmt(hp)}% V:{Fmt(vp)}%");
+
+                    if (r.Width > 0 && hs > 0 && hs < 100)
+                        sb.AppendLine($"[页面总宽度(估算)] {r.Width * 100.0 / hs:F0} px");
+                    if (r.Height > 0 && vs > 0 && vs < 100)
+                        sb.AppendLine($"[页面总高度(估算)] {r.Height * 100.0 / vs:F0} px");
+                    return;
+                }
+            }
+            catch { }
+
+            sb.AppendLine("[视口 ScrollPattern] 不支持");
+        }
+
+        private static void AppendWordScrollInfo(StringBuilder sb, AutomationElement windowEl)
+        {
+            IntPtr hwnd = IntPtr.Zero;
+            try { hwnd = (IntPtr)windowEl.Current.NativeWindowHandle; } catch { }
+
+            if (hwnd == IntPtr.Zero)
+            {
+                sb.AppendLine("[Word 文本区滚动] 不可用");
+                return;
+            }
+
+            var textArea = UILinkageScrollReader.FindWordTextArea(hwnd);
+            if (textArea == IntPtr.Zero)
+            {
+                sb.AppendLine("[Word 文本区滚动] 未找到 _WwG 窗口");
+                return;
+            }
+
+            if (UILinkageScrollReader.TryGetScroll(textArea, UILinkageScrollReader.SB_VERT, out var v))
+                sb.AppendLine($"[Word 竖直滚动] 最小={v.Min} 总行={v.Max} 可见行={v.Page} 位置={v.Pos}");
+            if (UILinkageScrollReader.TryGetScroll(textArea, UILinkageScrollReader.SB_HORZ, out var h))
+                sb.AppendLine($"[Word 水平滚动] 最小={h.Min} 总列={h.Max} 可见列={h.Page} 位置={h.Pos}");
+        }
+
+        /// <summary>
+        /// SumatraPDF 画布滚动信息：文档渲染区为画布子窗口（SUMATRA_PDF_CANVAS），
+        /// 无 UIA Document/ScrollPattern，滚动状态直接读其 Win32 滚动条。
+        /// 非 SumatraPDF 窗口静默跳过（避免对其它应用输出噪声行）。
+        /// </summary>
+        private static void AppendSumatraScrollInfo(StringBuilder sb, AutomationElement windowEl)
+        {
+            IntPtr hwnd = IntPtr.Zero;
+            try { hwnd = (IntPtr)windowEl.Current.NativeWindowHandle; } catch { }
+            if (hwnd == IntPtr.Zero) return;
+
+            var canvas = UILinkageScrollReader.FindSumatraCanvas(hwnd);
+            if (canvas == IntPtr.Zero) return;
+
+            if (UILinkageScrollReader.TryGetSumatraScrollPercents(canvas, 0, 0, out var vp, out var hp, out var vs, out var hs, out _))
+                sb.AppendLine($"[SumatraPDF 画布滚动] V:{vp:F1}%（视口 {vs:F0}%）  H:{hp:F1}%（视口 {hs:F0}%）");
+            else
+                sb.AppendLine("[SumatraPDF 画布滚动] 读取失败");
+        }
+
+        private static string DetectZoom(AutomationElement windowEl)
+        {
+            if (windowEl == null) return "未检测到";
+            try
+            {
+                // 优先：状态栏（Word 底部缩放指示位于状态栏内）。
+                var statusBar = windowEl.FindFirst(TreeScope.Descendants,
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.StatusBar));
+
+                if (statusBar != null)
+                {
+                    string zoom = ExtractZoomFromSubtree(statusBar);
+                    if (zoom != null) return zoom;
+                }
+                else
+                {
+                    string zoom = ExtractZoomFromSubtree(windowEl);
+                    if (zoom != null) return zoom;
+                }
+
+                return "未检测到";
+            }
+            catch { return "未检测到"; }
+        }
+
+        /// <summary>
+        /// 在元素子树中 BFS 提取缩放百分比：依次尝试 ValuePattern、RangeValuePattern（缩放滑块）、
+        /// Name 与 LegacyIAccessible 的 Name/Description。找不到返回 null。
+        /// </summary>
+        private static string ExtractZoomFromSubtree(AutomationElement root)
+        {
+            if (root == null) return null;
+
+            var walker = TreeWalker.ControlViewWalker;
+            var queue = new Queue<AutomationElement>();
+            queue.Enqueue(root);
+
+            int visited = 0;
+            while (queue.Count > 0 && visited++ < 800)
+            {
+                var el = queue.Dequeue();
+                try
+                {
+                    string type = el.Current.ControlType?.ProgrammaticName ?? "";
+
+                    // 1) ValuePattern 值文本。
+                    if (el.TryGetCurrentPattern(ValuePattern.Pattern, out var vp) && vp is ValuePattern vpp)
+                    {
+                        if (TryMatchZoom(vpp.Current.Value, out var z)) return z;
+                    }
+
+                    // 2) 缩放滑块（RangeValuePattern），范围限制避免误报滚动条。
+                    bool isSlider = type.EndsWith(".Slider", StringComparison.Ordinal);
+                    if (isSlider && el.TryGetCurrentPattern(RangeValuePattern.Pattern, out var rp) && rp is RangeValuePattern rpp)
+                    {
+                        double val = rpp.Current.Value;
+                        if (val >= 1 && val <= 800)
+                            return $"{val:F0}%";
+                    }
+
+                    // 3) Name（形如 NNN%）。
+                    if (TryMatchZoom(el.Current.Name, out var z2)) return z2;
+                }
+                catch
+                {
+                    // 忽略单个元素异常。
+                }
+
+                var n = walker.GetFirstChild(el);
+                while (n != null) { queue.Enqueue(n); n = walker.GetNextSibling(n); }
+            }
+
+            return null;
+        }
+
+        private static bool TryMatchZoom(string text, out string zoom)
+        {
+            zoom = null;
+            if (string.IsNullOrWhiteSpace(text)) return false;
+            var m = System.Text.RegularExpressions.Regex.Match(text.Trim(), @"(\d{1,4})\s*%");
+            if (m.Success)
+            {
+                zoom = m.Groups[1].Value + "%";
+                return true;
+            }
+            return false;
+        }
+
+        private static string ShortType(AutomationElement el)
+        {
+            string type = SafeRead(() => el.Current.ControlType?.ProgrammaticName);
+            if (string.IsNullOrEmpty(type)) return "?";
+            int dot = type.LastIndexOf('.');
+            if (dot >= 0 && dot + 1 < type.Length) type = type.Substring(dot + 1);
+            return type;
+        }
+
+        private static Rect SafeRect(AutomationElement el)
+        {
+            try { return el.Current.BoundingRectangle; }
+            catch { return Rect.Empty; }
+        }
+
+        #region 应用联动（Word / SumatraPDF 独立画布，多实例）
+
+        /// <summary>判断给定窗口元素是否属于 Word 进程（WINWORD）。</summary>
+        private static bool IsWordWindow(AutomationElement windowEl)
+        {
+            if (windowEl == null) return false;
+            try
+            {
+                int pid = windowEl.Current.ProcessId;
+                var p = Process.GetProcessById(pid);
+                return string.Equals(p.ProcessName, "WINWORD", StringComparison.OrdinalIgnoreCase);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>判断给定窗口元素是否属于 SumatraPDF 进程。</summary>
+        private static bool IsSumatraPdfWindow(AutomationElement windowEl)
+        {
+            if (windowEl == null) return false;
+            try
+            {
+                int pid = windowEl.Current.ProcessId;
+                var p = Process.GetProcessById(pid);
+                return string.Equals(p.ProcessName, "SumatraPDF", StringComparison.OrdinalIgnoreCase);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>
+        /// 读取实例视口的屏幕物理像素矩形。SumatraPDF 用画布子窗口矩形（原生子窗口，
+        /// 直接读 Win32 矩形避免 UIA 往返）；Word 用 Document 元素矩形。
+        /// </summary>
+        private static Rect GetUILinkageViewportRect(UILinkageCanvasInstance inst)
+            => inst == null
+                ? Rect.Empty
+                : GetUILinkageViewportRect(inst.Kind, inst.CanvasHwnd, inst.DocElement);
+
+        private static Rect GetUILinkageViewportRect(UILinkageTargetKind kind, IntPtr canvasHwnd, AutomationElement docEl)
+        {
+            if (kind == UILinkageTargetKind.SumatraPdf && canvasHwnd != IntPtr.Zero
+                && UILinkageWindowFinder.TryGetWindowRect(canvasHwnd, out var rect))
+                return rect;
+            return SafeRect(docEl);
+        }
+
+        /// <summary>
+        /// 重新解析实例的视口（DocElement 失效后调用）：
+        /// SumatraPDF 重找画布子窗口，Word 重找 Document 元素。成功返回 true。
+        /// </summary>
+        private bool EnsureUILinkageViewport(UILinkageCanvasInstance inst)
+        {
+            if (inst?.WindowElement == null) return false;
+
+            if (inst.Kind == UILinkageTargetKind.SumatraPdf)
+            {
+                // 换文档/显示模式切换可能重建画布子窗口：重找并刷新句柄与元素。
+                var canvasHwnd = UILinkageScrollReader.FindSumatraCanvas(inst.BoundHwnd);
+                if (canvasHwnd == IntPtr.Zero) return false;
+                inst.CanvasHwnd = canvasHwnd;
+                inst.DocElement = AutomationElement.FromHandle(canvasHwnd);
+                return inst.DocElement != null;
+            }
+
+            inst.DocElement = FindDocumentOfWindow(inst.WindowElement);
+            if (inst.DocElement != null)
+            {
+                // Document 元素重建过：其页面子元素缓存一并失效。
+                inst.PageElement = null;
+                inst.PageReadFailureCount = 0;
+            }
+            return inst.DocElement != null;
+        }
+
+        /// <summary>按实例类型解绑（对应应用的联动开关关闭时调用）。</summary>
+        private void UnbindUILinkageCanvasesOfKind(UILinkageTargetKind kind, bool captureLongScreenshot = true)
+        {
+            foreach (var inst in _uiLinkageInstances.Where(i => i.Kind == kind).ToList())
+                UnbindUILinkageInstance(inst, captureLongScreenshot);
+        }
+
+        /// <summary>
+        /// 校准 SumatraPDF 滚动条单位（绑定/换文档时一次，画布展示前进行）：
+        /// 端点往返标定「真实视口单位数/视口像素」比，修正 nPage 口径差；
+        /// 失败时保持 0（各处退回 nPage 估计）。
+        /// </summary>
+        private void CalibrateUILinkageSumatraScroll(UILinkageCanvasInstance inst, Rect viewportRect)
+        {
+            inst.SumatraUnitsPerPxV = 0;
+            inst.SumatraUnitsPerPxH = 0;
+            if (inst?.CanvasHwnd != IntPtr.Zero
+                && !viewportRect.IsEmpty && viewportRect.Width > 0 && viewportRect.Height > 0
+                && UILinkageScrollReader.TryCalibrateSumatraViewportUnits(
+                    inst.CanvasHwnd, viewportRect.Width, viewportRect.Height,
+                    out var perPxV, out var perPxH))
+            {
+                inst.SumatraUnitsPerPxV = perPxV;
+                inst.SumatraUnitsPerPxH = perPxH;
+            }
+        }
+
+        /// <summary>
+        /// 计算 SumatraPDF 当前有效视口单位数（校准值按当前视口像素尺寸等比换算）。
+        /// 未校准返回 0（调用方退回 nPage 估计）。
+        /// </summary>
+        private static void GetUILinkageSumatraEffUnits(
+            UILinkageCanvasInstance inst, Rect viewportRect, out double effUnitsV, out double effUnitsH)
+        {
+            effUnitsV = inst?.SumatraUnitsPerPxV > 0 && !viewportRect.IsEmpty && viewportRect.Height > 0
+                ? inst.SumatraUnitsPerPxV * viewportRect.Height
+                : 0;
+            effUnitsH = inst?.SumatraUnitsPerPxH > 0 && !viewportRect.IsEmpty && viewportRect.Width > 0
+                ? inst.SumatraUnitsPerPxH * viewportRect.Width
+                : 0;
+        }
+
+        /// <summary>按窗口直接查找首个 Document 元素。</summary>
+        private static AutomationElement FindDocumentOfWindow(AutomationElement windowEl)
+        {
+            if (windowEl == null) return null;
+            try
+            {
+                return windowEl.FindFirst(TreeScope.Descendants,
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Document));
+            }
+            catch { return null; }
+        }
+
+        /// <summary>读取 Document 元素的 ScrollPattern：滚动百分比与视口 ViewSize。</summary>
+        private static bool ReadWordScroll(
+            AutomationElement docEl, out double vp, out double hp, out double vs, out double hs)
+        {
+            vp = hp = vs = hs = double.NaN;
+            try
+            {
+                if (docEl.TryGetCurrentPattern(ScrollPattern.Pattern, out var p) && p is ScrollPattern sp)
+                {
+                    vp = sp.Current.VerticalScrollPercent;
+                    hp = sp.Current.HorizontalScrollPercent;
+                    vs = sp.Current.VerticalViewSize;
+                    hs = sp.Current.HorizontalViewSize;
+                    return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        /// <summary>创建并挂载一块独立画布（无内部填充，滚动条向外延伸）。</summary>
+        private Ink_Canvas.Controls.IndependentCanvas CreateUILinkageCanvas()
+        {
+            var canvas = new Ink_Canvas.Controls.IndependentCanvas
+            {
+                Visibility = Visibility.Collapsed,
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Top,
+                BorderStroke = new SolidColorBrush(Color.FromArgb(0x88, 0x25, 0x63, 0xEB)),
+                BorderStrokeThickness = new Thickness(2),
+                ShowVerticalScrollBar = true,
+                ShowHorizontalScrollBar = true
+            };
+            Panel.SetZIndex(canvas, UILinkageCanvasZIndex);
+            InkCanvasGridForInkReplay?.Children.Add(canvas);
+            return canvas;
+        }
+
+        /// <summary>
+        /// 把独立画布实例绑定到目标应用视口（Word Document / SumatraPDF 画布子窗口）。
+        /// - 新窗口：创建新实例（支持多文件分屏），加载该文档历史墨迹并显示跟随提示。
+        /// - 同窗口换文档：保存旧文档墨迹后清空重载，避免串笔迹。
+        /// - 同窗口同文档：仅刷新几何，不动墨迹。
+        /// SumatraPDF 的 docEl 传 null：内部按画布子窗口解析视口。
+        /// </summary>
+        private void BindUILinkageCanvas(
+            AutomationElement docEl, IntPtr hwnd, AutomationElement windowEl, UILinkageTargetKind kind)
+        {
+            IntPtr canvasHwnd = IntPtr.Zero;
+            if (kind == UILinkageTargetKind.SumatraPdf)
+            {
+                // SumatraPDF 无 UIA Document 元素，文档渲染区即画布子窗口（SUMATRA_PDF_CANVAS），
+                // 以该子窗口为视口、以窗口标题提取文档名。
+                canvasHwnd = UILinkageScrollReader.FindSumatraCanvas(hwnd);
+                if (canvasHwnd == IntPtr.Zero) return;
+                docEl = AutomationElement.FromHandle(canvasHwnd);
+            }
+
+            var r = GetUILinkageViewportRect(kind, canvasHwnd, docEl);
+            if (r.IsEmpty || r.Width <= 0 || r.Height <= 0) return;
+
+            var inst = _uiLinkageInstances.FirstOrDefault(i => i.BoundHwnd == hwnd);
+            bool created = inst == null;
+
+            if (created)
+            {
+                inst = new UILinkageCanvasInstance
+                {
+                    Canvas = CreateUILinkageCanvas(),
+                    BoundHwnd = hwnd,
+                    Bound = true,
+                    Kind = kind,
+                    CanvasHwnd = canvasHwnd
+                };
+                var captured = inst;
+                inst.Canvas.OnUserScroll = (o, v) => OnUILinkageCanvasUserScroll(captured, o, v);
+                inst.Canvas.OnScrollStepRequested = (o, d) => OnUILinkageCanvasScrollStep(captured, o, d);
+                _uiLinkageInstances.Add(inst);
+            }
+            else
+            {
+                // 复用实例：类型不会变化，但刷新画布子窗口句柄（SumatraPDF 可能重建）。
+                inst.Kind = kind;
+                if (canvasHwnd != IntPtr.Zero) inst.CanvasHwnd = canvasHwnd;
+            }
+
+            string docName = TryComputeUILinkageDocName(windowEl, out var detectedName)
+                ? detectedName
+                : (inst.DocName ?? "Untitled");
+
+            if (created)
+            {
+                inst.DocName = docName;
+                // SumatraPDF：先做一次滚动单位端点校准（画布尚未展示，端点往返不可见）。
+                if (kind == UILinkageTargetKind.SumatraPdf)
+                    CalibrateUILinkageSumatraScroll(inst, r);
+                inst.Canvas.BeginScrollSession();
+                LoadUILinkageInk(inst);
+                inst.Canvas.ResetInkHistory();
+                inst.Canvas.ShowFollowNotice();
+                RestoreUILinkageScrollPosition(inst);
+            }
+            else if (!string.Equals(inst.DocName, docName, StringComparison.Ordinal))
+            {
+                // 同一窗口切换了文档：保存旧文档墨迹与滚动位置后清空重载，避免串笔迹。
+                SaveUILinkageScrollPosition(inst);
+                SaveUILinkageInk(inst);
+                inst.Canvas.Strokes.Clear();
+                inst.DocName = docName;
+                // 新文档内容坐标系与旧帧无关：重置滚动帧，载入的内容锚定墨迹才能对齐。
+                inst.Canvas.ResetScrollFrame();
+                // SumatraPDF：新文档布局不同，重新校准滚动单位。
+                if (kind == UILinkageTargetKind.SumatraPdf)
+                    CalibrateUILinkageSumatraScroll(inst, r);
+                LoadUILinkageInk(inst);
+                inst.Canvas.ResetInkHistory();
+                RestoreUILinkageScrollPosition(inst);
+            }
+
+            inst.WindowElement = windowEl;
+            inst.DocElement = docEl;
+            UpdateUILinkageInstanceGeometry(inst, r);
+
+            // 首笔识别：把绑定完成前落在该视口内的笔迹从主画布迁入独立画布。
+            MovePendingStrokesInto(inst);
+
+            SyncUILinkageCanvasState();
+        }
+
+        /// <summary>
+        /// 解除单个实例绑定：记忆滚动位置、保存墨迹并移除画布。
+        /// <paramref name="captureLongScreenshot"/> 为 true 且长截屏启动成功时，
+        /// 画布保留在屏幕上（墨迹仍可见供滚动截屏），由截图完成回调移除。
+        /// </summary>
+        private void UnbindUILinkageInstance(UILinkageCanvasInstance inst, bool captureLongScreenshot = true)
+        {
+            if (inst == null) return;
+
+            if (inst.Bound)
+            {
+                SaveUILinkageScrollPosition(inst);
+                inst.Canvas?.FlushScrollAnimation();
+                SaveUILinkageInk(inst);
+                inst.Bound = false;
+                _uiLinkageInstances.Remove(inst);
+
+                if (captureLongScreenshot && StartUILinkageLongScreenshotCapture(inst))
+                    return;
+            }
+
+            if (inst.Canvas != null)
+            {
+                inst.Canvas.Visibility = Visibility.Collapsed;
+                InkCanvasGridForInkReplay?.Children.Remove(inst.Canvas);
+            }
+        }
+
+        /// <summary>解除全部实例绑定（Word 联动关闭、窗口关闭时调用）。</summary>
+        private void UnbindAllUILinkageCanvases(bool captureLongScreenshot = true)
+        {
+            if (_uiLinkageInstances.Count == 0) return;
+            foreach (var inst in _uiLinkageInstances.ToList())
+                UnbindUILinkageInstance(inst, captureLongScreenshot);
+            _uiLinkagePendingStrokes.Clear();
+        }
+
+        /// <summary>
+        /// 把绑定前落在该实例视口内的待迁移笔迹从主画布迁入独立画布。
+        /// 触发那一笔可能已被收笔后处理（平滑/拉直/形状识别）替换为新实例：
+        /// 在「触发后新增」的笔画中优先解析外接框覆盖触发首点的最新一笔；
+        /// 未被替换时直接使用原实例。
+        /// </summary>
+        private void MovePendingStrokesInto(UILinkageCanvasInstance inst)
+        {
+            if (inst?.Canvas == null || _uiLinkagePendingStrokes.Count == 0) return;
+
+            var margin = inst.Canvas.Margin;
+            var toLocalMatrix = new Matrix(1, 0, 0, 1, -margin.Left, -margin.Top);
+
+            foreach (var pending in _uiLinkagePendingStrokes)
+            {
+                try
+                {
+                    if (pending?.StrokesAtTrigger == null || inkCanvas == null) continue;
+
+                    // 在触发后新增的笔画里解析替换后的那一笔（外接框覆盖触发首点、距离最近者）。
+                    Stroke target = null;
+                    double bestDistance = double.MaxValue;
+                    foreach (Stroke s in inkCanvas.Strokes)
+                    {
+                        if (pending.StrokesAtTrigger.Contains(s)) continue;
+
+                        var b = s.GetBounds();
+                        double dist = 0;
+                        if (!b.Contains(pending.FirstPointInkCanvas))
+                        {
+                            double dx = Math.Max(Math.Max(b.Left - pending.FirstPointInkCanvas.X, 0),
+                                pending.FirstPointInkCanvas.X - b.Right);
+                            double dy = Math.Max(Math.Max(b.Top - pending.FirstPointInkCanvas.Y, 0),
+                                pending.FirstPointInkCanvas.Y - b.Bottom);
+                            dist = dx * dx + dy * dy;
+                            if (dist > 64 * 64) continue; // 距触发首点过远，视为无关的新笔
+                        }
+
+                        if (target == null || dist <= bestDistance)
+                        {
+                            bestDistance = dist;
+                            target = s;
+                        }
+                    }
+
+                    // 未被替换：原实例仍在主画布，直接使用。
+                    if (target == null
+                        && pending.StrokeReference != null
+                        && inkCanvas.Strokes.Contains(pending.StrokeReference))
+                    {
+                        target = pending.StrokeReference;
+                    }
+
+                    if (target == null || target.StylusPoints.Count == 0) continue;
+
+                    var screenPt = inkCanvas.PointToScreen(target.StylusPoints[0].ToPoint());
+                    if (!inst.ScreenRect.Contains(screenPt)) continue;
+
+                    target.Transform(toLocalMatrix, false);
+                    // 主画布 StrokesChanged 会自动提交「擦除」历史，主画布撤销可还原该笔。
+                    inkCanvas.Strokes.Remove(target);
+                    // 独立画布历史自动记录新增，可在独立画布内撤销。
+                    inst.Canvas.Strokes.Add(target);
+                }
+                catch (Exception ex)
+                {
+                    LogHelper.WriteLogToFile($"UI联动首笔迁移失败: {ex.Message}", LogHelper.LogType.Warning);
+                }
+            }
+
+            _uiLinkagePendingStrokes.Clear();
+        }
+
+        /// <summary>任一已绑定且可见实例的视口是否包含该屏幕物理像素点。</summary>
+        private bool AnyUILinkageCanvasContains(Point screenPt)
+        {
+            foreach (var inst in _uiLinkageInstances)
+            {
+                if (inst.Bound && inst.Canvas != null
+                    && inst.Canvas.Visibility == Visibility.Visible
+                    && inst.ScreenRect.Contains(screenPt))
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>按主画布坐标查找该点所在的可见绑定实例。</summary>
+        internal bool TryGetUILinkageInstanceAt(Point inkCanvasPoint, out UILinkageCanvasInstance instance)
+        {
+            instance = null;
+            if (inkCanvas == null) return false;
+            try
+            {
+                var screenPt = inkCanvas.PointToScreen(inkCanvasPoint);
+                instance = _uiLinkageInstances.FirstOrDefault(i =>
+                    i.Bound && i.Canvas != null
+                    && i.Canvas.Visibility == Visibility.Visible
+                    && i.ScreenRect.Contains(screenPt));
+                return instance != null;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>所有可见且已绑定的实例（清空按钮等批量操作用）。</summary>
+        internal IEnumerable<UILinkageCanvasInstance> GetVisibleBoundUILinkageInstances()
+            => _uiLinkageInstances.Where(i =>
+                i.Bound && i.Canvas != null && i.Canvas.Visibility == Visibility.Visible);
+
+        /// <summary>
+        /// 把主画布(inkCanvas)坐标点换算为指定实例独立画布的本地坐标。
+        /// 独立画布与主画布同处 InkCanvasGridForInkReplay 且无渲染变换，
+        /// 本地坐标 = 主坐标 - 画布 Margin。
+        /// </summary>
+        internal bool TryGetUILinkageLocalPoint(Point inkCanvasPoint, out Point localPoint)
+            => TryGetUILinkageLocalPoint(inkCanvasPoint, null, out localPoint);
+
+        internal bool TryGetUILinkageLocalPoint(
+            Point inkCanvasPoint, UILinkageCanvasInstance instance, out Point localPoint)
+        {
+            localPoint = default;
+            if (instance == null && !TryGetUILinkageInstanceAt(inkCanvasPoint, out instance)) return false;
+            if (instance?.Canvas == null || instance.Canvas.Visibility != Visibility.Visible) return false;
+
+            var margin = instance.Canvas.Margin;
+            localPoint = new Point(inkCanvasPoint.X - margin.Left, inkCanvasPoint.Y - margin.Top);
+            return true;
+        }
+
+        /// <summary>
+        /// 逻辑工具 → 独立画布 WPF 编辑模式。
+        /// 原生湿墨迹管线激活时逻辑笔的物理 EditingMode 为 None（见 EnsureNativePenPhysicalEditingMode），
+        /// 不能直接照抄物理模式；鼠标/图形/漫游模式下独立画布保持 None（不接收输入）。
+        /// </summary>
+        private InkCanvasEditingMode GetUILinkageEffectiveEditingMode()
+        {
+            if (inkCanvas == null) return InkCanvasEditingMode.None;
+
+            switch (_currentToolMode)
+            {
+                case "pen":
+                case "color":
+                    return InkCanvasEditingMode.Ink;
+                case "eraser":
+                    return InkCanvasEditingMode.EraseByPoint;
+                case "eraserByStrokes":
+                    return InkCanvasEditingMode.EraseByStroke;
+                case "select":
+                    return InkCanvasEditingMode.Select;
+                default:
+                    // cursor / shape / roaming 等：独立画布不接收输入。
+                    return InkCanvasEditingMode.None;
+            }
+        }
+
+        /// <summary>独立画布与主画布共享批注栏状态（编辑模式 + 笔属性），但不共享墨迹。</summary>
+        private void SyncUILinkageCanvasState()
+        {
+            // 交互判定必须用逻辑工具（_currentToolMode）：原生笔模式物理 EditingMode 是 None，
+            // 若按物理模式判定会把独立画布错误禁用，书写落到主画布。
+            var effectiveMode = GetUILinkageEffectiveEditingMode();
+            bool interactive = effectiveMode != InkCanvasEditingMode.None;
+
+            foreach (var inst in _uiLinkageInstances)
+            {
+                if (inst?.Canvas == null) continue;
+
+                if (inkCanvas != null)
+                {
+                    if (inst.Canvas.InkSurface.EditingMode != effectiveMode)
+                        inst.Canvas.InkSurface.EditingMode = effectiveMode;
+
+                    var attrs = inkCanvas.DefaultDrawingAttributes;
+                    if (attrs != null)
+                    {
+                        var cur = inst.Canvas.InkSurface.DefaultDrawingAttributes;
+                        if (cur == null || cur.Color != attrs.Color || cur.Width != attrs.Width || cur.Height != attrs.Height)
+                            inst.Canvas.InkSurface.DefaultDrawingAttributes = attrs.Clone();
+                    }
+
+                    // 同步橡皮擦形状（面积擦/线擦在独立画布上使用原生 InkCanvas 擦除时需要一致形状）。
+                    inst.Canvas.InkSurface.EraserShape = inkCanvas.EraserShape;
+                }
+
+                if (inst.Canvas.IsHitTestVisible != interactive)
+                    inst.Canvas.IsHitTestVisible = interactive;
+
+                // 鼠标模式下暂停显示滚动条与撤销/恢复按钮（无法交互）。
+                inst.Canvas.SetScrollBarsSuppressed(!interactive);
+            }
+        }
+
+        /// <summary>
+        /// 轮询各实例视口滚动（Word 走 ScrollPattern，SumatraPDF 走 Win32 滚动条读数），
+        /// 调用独立画布 SetScrollInfo 平移其墨迹并驱动滚动条。
+        /// 窗口关闭/视口失效时解除该实例绑定。
+        /// </summary>
+        private void UpdateUILinkageScrollSync()
+        {
+            // 关闭的联动目标：解除对应类型实例的绑定。
+            bool wordEnabled = UILinkageIsWordEnabled;
+            bool sumatraEnabled = UILinkageIsSumatraPdfEnabled;
+            if (!wordEnabled) UnbindUILinkageCanvasesOfKind(UILinkageTargetKind.Word);
+            if (!sumatraEnabled) UnbindUILinkageCanvasesOfKind(UILinkageTargetKind.SumatraPdf);
+            if (!wordEnabled && !sumatraEnabled)
+            {
+                _uiLinkagePendingStrokes.Clear();
+                return;
+            }
+
+            foreach (var inst in _uiLinkageInstances.ToList())
+            {
+                if (inst?.Canvas == null) continue;
+
+                if (!UILinkageWindowFinder.IsWindowAlive(inst.BoundHwnd))
+                {
+                    UnbindUILinkageInstance(inst);
+                    continue;
+                }
+
+                // 窗口最小化：跳过滚动同步（几何刷新会隐藏画布；最小化时 UIA/窗口矩形是
+                // 离屏垃圾值，用它驱动偏移会把墨迹推飞，恢复后首拍重新对齐即可）。
+                if (UILinkageWindowFinder.IsMinimized(inst.BoundHwnd)) continue;
+
+                // 长截屏进行中：跳过滚动同步，避免与截图用的程序性滚动互相干扰。
+                if (inst.IsCapturingLongScreenshot) continue;
+
+                var r = GetUILinkageViewportRect(inst);
+                if (r.IsEmpty || r.Width <= 0 || r.Height <= 0) continue;
+
+                double vp, hp, vs, hs;
+                double sumatraZoomMetric = double.NaN;
+                if (inst.Kind == UILinkageTargetKind.SumatraPdf)
+                {
+                    GetUILinkageSumatraEffUnits(inst, r, out var effV, out var effH);
+                    if (!UILinkageScrollReader.TryGetSumatraScrollPercents(
+                            inst.CanvasHwnd, effV, effH, out vp, out hp, out vs, out hs, out var pageUnitsV))
+                    {
+                        // 画布子窗口可能被重建（换文档/显示模式切换）：重找后再读一次。
+                        if (!EnsureUILinkageViewport(inst))
+                        {
+                            UnbindUILinkageInstance(inst);
+                            continue;
+                        }
+                        GetUILinkageSumatraEffUnits(inst, r, out effV, out effH);
+                        if (!UILinkageScrollReader.TryGetSumatraScrollPercents(
+                                inst.CanvasHwnd, effV, effH, out vp, out hp, out vs, out hs, out pageUnitsV))
+                        {
+                            UnbindUILinkageInstance(inst);
+                            continue;
+                        }
+                    }
+
+                    // 缩放度量：nPage（视口占用滚动条单位数）与视口像素高度之比随缩放线性变化；
+                    // 窗口/侧栏尺寸变化时两者同步缩放、比值不变，因此可作为缩放变化检测。
+                    if (pageUnitsV > 0) sumatraZoomMetric = pageUnitsV / r.Height * 100.0;
+                }
+                else
+                {
+                    if (!ReadWordScroll(inst.DocElement, out vp, out hp, out vs, out hs))
+                    {
+                        if (!EnsureUILinkageViewport(inst)
+                            || !ReadWordScroll(inst.DocElement, out vp, out hp, out vs, out hs))
+                        {
+                            UnbindUILinkageInstance(inst);
+                            continue;
+                        }
+                    }
+                }
+
+                if (double.IsNaN(vp) || double.IsNaN(hp)) continue;
+
+                var dpi = VisualTreeHelper.GetDpi(this);
+                double viewW = r.Width / dpi.DpiScaleX;
+                double viewH = r.Height / dpi.DpiScaleY;
+
+                double extW = viewW * (hs > 0 && hs < 100 ? 100.0 / hs : 1.0);
+                double extH = viewH * (vs > 0 && vs < 100 ? 100.0 / vs : 1.0);
+
+                double offX = (hp / 100.0) * Math.Max(0, extW - viewW);
+                double offY = (vp / 100.0) * Math.Max(0, extH - viewH);
+
+                // 缩放支持：读缩放指示，缩放变化时把墨迹按比例重缩放（锚定文档内容）。
+                // 必须在本轮 SetScrollInfo 之前执行，缩放锚点依赖当前已应用偏移。
+                // Word 读状态栏缩放指示；SumatraPDF 无 UIA 暴露的缩放指示，
+                // 用 nPage/视口像素比作度量（仅比值有意义）。
+                if (inst.Kind == UILinkageTargetKind.Word)
+                {
+                    HandleUILinkageZoomChange(inst, ReadUILinkageZoom(inst));
+                }
+                else
+                {
+                    // 缩放变化：滚动条单位/像素比同步按比例递推（免重新端点校准）。
+                    // 首次读到度量时仅消费按文档记忆的历史缩放（重缩放载入墨迹），
+                    // 校准比本就是当前缩放下的值，无需调整。
+                    double zoomScale = HandleUILinkageZoomChange(inst, sumatraZoomMetric);
+                    if (!double.IsNaN(zoomScale))
+                    {
+                        inst.SumatraUnitsPerPxV *= zoomScale;
+                        inst.SumatraUnitsPerPxH *= zoomScale;
+                    }
+                }
+
+                // 横向偏移：Word 页面化视图中，页宽适配视口时页面水平居中、超宽时贴左并出现
+                // 横向滚动条，ScrollPattern 的 hp 百分比无法表达居中位移——跨过「有无横向
+                // 滚动条」边界时墨迹会整体横移。Word 把当前页作为 Document 的 Custom 子元素
+                // （如「页面 1」）暴露，直接实测页面左缘的视口位移（居中/贴左/标尺占用全部
+                // 自动吸收），横向偏移取其相反数；读不到（草稿/Web 版式无页面元素）退回 hp 推算。
+                double offsetX = offX;
+                if (inst.Kind == UILinkageTargetKind.Word
+                    && TryReadUILinkagePageLeftDip(inst, r, dpi, out double pageLeftDip))
+                {
+                    offsetX = -pageLeftDip;
+                }
+
+                // 缓存本次读数，供滚动记忆与长截屏使用（LastOffsetX 为实际下发的有效偏移）。
+                inst.LastVpPercent = vp;
+                inst.LastHpPercent = hp;
+                inst.LastViewW = viewW;
+                inst.LastViewH = viewH;
+                inst.LastExtW = extW;
+                inst.LastExtH = extH;
+                inst.LastOffsetX = offsetX;
+                inst.LastOffsetY = offY;
+
+                inst.Canvas.SetScrollInfo(
+                    new Size(viewW, viewH), new Size(extW, extH), new Vector(offsetX, offY), animate: true);
+            }
+        }
+
+        // ---------------- 缩放支持（状态栏缩放读取 + 墨迹按比例重缩放） ----------------
+
+        /// <summary>
+        /// 读取当前 Word 缩放百分比（状态栏缩放指示）。缓存元素后每次只做一次廉价属性读取；
+        /// 缓存失效后按冷却重找。读不到返回 NaN。
+        /// </summary>
+        private double ReadUILinkageZoom(UILinkageCanvasInstance inst)
+        {
+            if (inst.ZoomElement != null)
+            {
+                if (UILinkageZoomReader.TryReadZoom(inst.ZoomElement, out double cached))
+                    return cached;
+
+                // 缓存失效（状态栏重建等）：失效后冷却重找。
+                inst.ZoomElement = null;
+                inst.NextZoomFindUtc = DateTime.UtcNow + UILinkageZoomFindCooldown;
+                return double.NaN;
+            }
+
+            if (DateTime.UtcNow < inst.NextZoomFindUtc) return double.NaN;
+            inst.NextZoomFindUtc = DateTime.UtcNow + UILinkageZoomFindCooldown;
+
+            inst.ZoomElement = UILinkageZoomReader.FindZoomElement(inst.WindowElement);
+            if (inst.ZoomElement != null && UILinkageZoomReader.TryReadZoom(inst.ZoomElement, out double found))
+                return found;
+            return double.NaN;
+        }
+
+        /// <summary>
+        /// 处理缩放读数：首次读到时消费按文档记忆的历史缩放（重缩放载入墨迹）；
+        /// 之后检测到缩放变化时把全部墨迹按比例重缩放，保持墨迹锚定文档内容。
+        /// 返回本次应用的缩放系数（未应用变化返回 NaN，供调用方联动其它按缩放递推的状态）。
+        /// </summary>
+        private double HandleUILinkageZoomChange(UILinkageCanvasInstance inst, double zoomPercent)
+        {
+            if (double.IsNaN(zoomPercent) || zoomPercent <= 0) return double.NaN;
+
+            double previous = inst.LastZoomPercent;
+            inst.LastZoomPercent = zoomPercent;
+
+            if (double.IsNaN(previous) || previous <= 0)
+            {
+                ConsumeUILinkageSavedZoom(inst);
+                return double.NaN;
+            }
+
+            // 忽略 1% 以内的抖动（百分比文本为整数读数，滑块读数可能带小数）；
+            // 连续小变化由 LastZoomPercent 逐次推进，不会漏掉累计变化。
+            if (Math.Abs(zoomPercent - previous) < 1.0) return double.NaN;
+
+            double scale = zoomPercent / previous;
+            ApplyUILinkageZoomScale(inst, scale);
+            return scale;
+        }
+
+        /// <summary>
+        /// 消费按文档记忆的历史缩放：载入墨迹保存于另一缩放比例时，首次读到当前缩放
+        /// 即把这批载入墨迹按当前/保存比例重缩放（绑定后新写的墨迹已是当前比例，不参与）。
+        /// </summary>
+        private void ConsumeUILinkageSavedZoom(UILinkageCanvasInstance inst)
+        {
+            double saved = inst.SavedZoomPercent;
+            inst.SavedZoomPercent = double.NaN;
+            var loaded = inst.LoadedInkStrokes;
+            inst.LoadedInkStrokes = null;
+
+            if (double.IsNaN(saved) || saved <= 0) return;
+            if (loaded == null || loaded.Count == 0) return;
+
+            ApplyUILinkageZoomScale(inst, inst.LastZoomPercent / saved, loaded);
+        }
+
+        /// <summary>
+        /// 把墨迹按缩放比 k 重缩放（含笔迹粗细），锚点为文档内容原点。
+        /// <para>
+        /// 数据坐标 d 对应内容位置 C = d + S（S 为画布当前已应用偏移，内容原点即 d = -S）；
+        /// 缩放后 C' = C·k，故 d' = (d + S)·k − S = k·d + (k−1)·S。随后本轮
+        /// <see cref="UpdateUILinkageScrollSync"/> 的 SetScrollInfo 会按新偏移把墨迹平移到
+        /// 正确视口位置，两步合成后墨迹精确贴合缩放后的文档内容。
+        /// </para>
+        /// </summary>
+        private void ApplyUILinkageZoomScale(
+            UILinkageCanvasInstance inst, double k, IEnumerable<Stroke> strokes = null)
+        {
+            if (inst?.Canvas == null) return;
+            if (double.IsNaN(k) || double.IsInfinity(k) || k <= 0 || Math.Abs(k - 1.0) < 0.0005) return;
+
+            try
+            {
+                // 先烘焙未应用的滚动位移，保证「数据坐标 == 当前偏移下的视觉坐标」，
+                // 缩放锚点（内容原点）在数据坐标系中的位置才可靠。
+                inst.Canvas.FlushScrollAnimation();
+
+                if (strokes == null) strokes = inst.Canvas.Strokes;
+
+                var s = inst.Canvas.AppliedScrollOffset;
+                var matrix = new Matrix(k, 0, 0, k, (k - 1) * s.X, (k - 1) * s.Y);
+                foreach (Stroke stroke in strokes)
+                    stroke.Transform(matrix, false);
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"UI联动缩放同步失败: {ex.Message}", LogHelper.LogType.Warning);
+            }
+        }
+
+        // ---------------- 横向页面定位（页面化视图居中位移的实测基准，仅 Word） ----------------
+
+        /// <summary>
+        /// 读取页面左缘相对 Document 视口左缘的位移（DIP）。
+        /// <para>
+        /// 页面化视图（打印版式）中，页宽适配视口时页面水平居中、超宽时贴左并出现横向
+        /// 滚动条，ScrollPattern 的 hp 百分比无法表达居中位移，跨过「有无横向滚动条」
+        /// 边界时墨迹会整体横移。Word 在 Document 下以 Custom 子元素（如「页面 1」）
+        /// 暴露当前页，直接读其矩形即可精确得到页面左缘视口位置；横向各页共线，
+        /// 任一页面元素均可用。瞬时读取失败沿用上次读数（页面不会瞬移），
+        /// 连续失败才判定元素失效重找；完全不可用时由调用方退回 hp 推算。
+        /// </para>
+        /// </summary>
+        private bool TryReadUILinkagePageLeftDip(
+            UILinkageCanvasInstance inst, Rect docRect, DpiScale dpi, out double pageLeftDip)
+        {
+            pageLeftDip = 0;
+            if (inst?.DocElement == null || docRect.IsEmpty || docRect.Width <= 0) return false;
+
+            var el = inst.PageElement;
+            if (el != null)
+            {
+                if (TryGetUILinkagePageLeftDip(el, docRect, dpi, out pageLeftDip))
+                {
+                    inst.PageReadFailureCount = 0;
+                    inst.LastPageLeftDip = pageLeftDip;
+                    return true;
+                }
+
+                // 瞬时无效读数（重排中等）：沿用上次页面位置，避免帧在两种基准间跳动；
+                // 连续多次失败才判定元素失效，冷却重找。
+                if (++inst.PageReadFailureCount <= 4)
+                {
+                    if (!double.IsNaN(inst.LastPageLeftDip))
+                    {
+                        pageLeftDip = inst.LastPageLeftDip;
+                        return true;
+                    }
+                    return false;
+                }
+
+                inst.PageReadFailureCount = 0;
+                inst.PageElement = null;
+                inst.NextPageFindUtc = DateTime.UtcNow + UILinkagePageFindCooldown;
+                return false;
+            }
+
+            if (DateTime.UtcNow < inst.NextPageFindUtc) return false;
+            inst.NextPageFindUtc = DateTime.UtcNow + UILinkagePageFindCooldown;
+
+            inst.PageElement = FindUILinkagePageElement(inst.DocElement);
+            if (inst.PageElement != null
+                && TryGetUILinkagePageLeftDip(inst.PageElement, docRect, dpi, out pageLeftDip))
+            {
+                inst.PageReadFailureCount = 0;
+                inst.LastPageLeftDip = pageLeftDip;
+                return true;
+            }
+            return false;
+        }
+
+        private static bool TryGetUILinkagePageLeftDip(
+            AutomationElement pageEl, Rect docRect, DpiScale dpi, out double pageLeftDip)
+        {
+            pageLeftDip = 0;
+            var pr = SafeRect(pageEl);
+            if (pr.IsEmpty || pr.Width <= 0 || pr.Height <= 0) return false;
+
+            double left = (pr.Left - docRect.Left) / dpi.DpiScaleX;
+            double pageW = pr.Width / dpi.DpiScaleX;
+            double viewW = docRect.Width / dpi.DpiScaleX;
+
+            // 合理性：滚动到最右时页面左缘最多左移约一个页宽，超出视为无效读数
+            // （如窗口最小化时的离屏垃圾矩形）。
+            if (double.IsNaN(left) || double.IsInfinity(left)
+                || Math.Abs(left) > 3 * Math.Max(pageW, viewW))
+                return false;
+
+            pageLeftDip = left;
+            return true;
+        }
+
+        /// <summary>查找 Document 的页面子元素（ControlType.Custom，如「页面 1」）；仅直接子级，代价极低。</summary>
+        private static AutomationElement FindUILinkagePageElement(AutomationElement docEl)
+        {
+            if (docEl == null) return null;
+            try
+            {
+                var walker = TreeWalker.ControlViewWalker;
+                var child = walker.GetFirstChild(docEl);
+                int guard = 0;
+                while (child != null && guard++ < 8)
+                {
+                    try
+                    {
+                        if (child.Current.ControlType == ControlType.Custom) return child;
+                    }
+                    catch
+                    {
+                        // 忽略单个子元素异常。
+                    }
+                    child = walker.GetNextSibling(child);
+                }
+            }
+            catch
+            {
+                // 忽略遍历异常。
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// 轮询刷新各实例独立画布的位置/尺寸（跟随目标组件移动）、窗口最小化隐藏、
+        /// 遮挡裁切，以及同窗口文档切换检测（标题变化时保存并重载墨迹，避免串笔迹）。
+        /// </summary>
+        private void UpdateUILinkageCanvasGeometry()
+        {
+            foreach (var inst in _uiLinkageInstances.ToList())
+            {
+                if (inst?.Canvas == null || !inst.Bound) continue;
+
+                // 目标窗口最小化：临时隐藏画布（不解除绑定、不丢失墨迹）。
+                if (UILinkageWindowFinder.IsMinimized(inst.BoundHwnd))
+                {
+                    if (inst.Canvas.Visibility != Visibility.Collapsed)
+                        inst.Canvas.Visibility = Visibility.Collapsed;
+                    continue;
+                }
+
+                if (inst.DocElement == null && !EnsureUILinkageViewport(inst))
+                {
+                    UnbindUILinkageInstance(inst);
+                    continue;
+                }
+
+                var r = GetUILinkageViewportRect(inst);
+                if (r.IsEmpty || r.Width <= 0 || r.Height <= 0) continue;
+
+                UpdateUILinkageInstanceGeometry(inst, r);
+
+                // 同窗口文档切换检测（轮询兜底，窗口标题变化即换绑墨迹）。
+                if (TryComputeUILinkageDocName(inst.WindowElement, out var currentName)
+                    && !string.Equals(currentName, inst.DocName, StringComparison.Ordinal))
+                {
+                    SaveUILinkageScrollPosition(inst);
+                    SaveUILinkageInk(inst);
+                    inst.Canvas.Strokes.Clear();
+                    inst.DocName = currentName;
+                    // 新文档内容坐标系与旧帧无关：重置滚动帧，载入的内容锚定墨迹才能对齐。
+                    inst.Canvas.ResetScrollFrame();
+                    // SumatraPDF：新文档布局不同，重新校准滚动单位（端点往返发生在换档瞬间）。
+                    if (inst.Kind == UILinkageTargetKind.SumatraPdf)
+                        CalibrateUILinkageSumatraScroll(inst, r);
+                    LoadUILinkageInk(inst);
+                    inst.Canvas.ResetInkHistory();
+                    RestoreUILinkageScrollPosition(inst);
+                }
+
+                var dpi = VisualTreeHelper.GetDpi(this);
+                UpdateUILinkageCanvasClip(inst, r, dpi);
+            }
+        }
+
+        /// <summary>刷新单个实例画布的位置/尺寸/可见性（跟随目标组件移动）。</summary>
+        private void UpdateUILinkageInstanceGeometry(UILinkageCanvasInstance inst, Rect screenRect)
+        {
+            if (inst?.Canvas == null) return;
+
+            var dpi = VisualTreeHelper.GetDpi(this);
+            var topLeft = PointFromScreen(screenRect.TopLeft);
+            double w = Math.Max(1, screenRect.Width / dpi.DpiScaleX);
+            double h = Math.Max(1, screenRect.Height / dpi.DpiScaleY);
+
+            if (inst.Canvas.Visibility != Visibility.Visible)
+                inst.Canvas.Visibility = Visibility.Visible;
+
+            inst.Canvas.SetViewportSize(w, h);
+            var margin = new Thickness(topLeft.X, topLeft.Y, 0, 0);
+            if (inst.Canvas.Margin != margin)
+                inst.Canvas.Margin = margin;
+            inst.ScreenRect = screenRect;
+        }
+
+        /// <summary>根据目标组件被遮挡情况，把独立画布（含墨迹/边框）裁掉被遮挡区域。</summary>
+        private void UpdateUILinkageCanvasClip(UILinkageCanvasInstance inst, Rect screenRect, DpiScale dpi)
+        {
+            if (inst?.Canvas == null) return;
+
+            var selfHwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+            var occluded = UILinkageWindowFinder.GetOccludedRects(inst.BoundHwnd, selfHwnd, screenRect);
+
+            if (occluded.Count == 0)
+            {
+                inst.Canvas.SetClip(null);
+                return;
+            }
+
+            double w = screenRect.Width / dpi.DpiScaleX;
+            double h = screenRect.Height / dpi.DpiScaleY;
+            var visible = (Geometry)new RectangleGeometry(new Rect(0, 0, w, h));
+
+            foreach (var rect in occluded)
+            {
+                double left = (rect.Left - screenRect.Left) / dpi.DpiScaleX;
+                double top = (rect.Top - screenRect.Top) / dpi.DpiScaleY;
+                double rw = rect.Width / dpi.DpiScaleX;
+                double rh = rect.Height / dpi.DpiScaleY;
+                if (rw <= 0 || rh <= 0) continue;
+
+                var occ = new RectangleGeometry(new Rect(left, top, rw, rh));
+                visible = new CombinedGeometry(GeometryCombineMode.Exclude, visible, occ);
+            }
+
+            inst.Canvas.SetClip(visible);
+        }
+
+        /// <summary>用户拖动独立画布滚动条：把目标像素偏移换算为滚动百分比，下发到目标应用真实滚动。</summary>
+        private void OnUILinkageCanvasUserScroll(UILinkageCanvasInstance inst, Orientation orientation, double value)
+        {
+            if (inst == null || !inst.Bound || inst.DocElement == null) return;
+
+            try
+            {
+                var r = GetUILinkageViewportRect(inst);
+                if (r.IsEmpty || r.Width <= 0 || r.Height <= 0) return;
+
+                double vp, hp, vs, hs;
+                if (inst.Kind == UILinkageTargetKind.SumatraPdf)
+                {
+                    GetUILinkageSumatraEffUnits(inst, r, out var effV, out var effH);
+                    if (!UILinkageScrollReader.TryGetSumatraScrollPercents(
+                            inst.CanvasHwnd, effV, effH, out vp, out hp, out vs, out hs, out _))
+                        return;
+                }
+                else
+                {
+                    if (!ReadWordScroll(inst.DocElement, out vp, out hp, out vs, out hs))
+                        return;
+                }
+
+                var dpi = VisualTreeHelper.GetDpi(this);
+                double viewW = r.Width / dpi.DpiScaleX;
+                double viewH = r.Height / dpi.DpiScaleY;
+
+                double extW = viewW * (hs > 0 && hs < 100 ? 100.0 / hs : 1.0);
+                double extH = viewH * (vs > 0 && vs < 100 ? 100.0 / vs : 1.0);
+
+                double hpTarget = ScrollPattern.NoScroll;
+                double vpTarget = ScrollPattern.NoScroll;
+                if (orientation == Orientation.Vertical)
+                {
+                    double scrollable = extH - viewH;
+                    vpTarget = scrollable > 0 ? Math.Min(100.0, Math.Max(0.0, value / scrollable * 100.0)) : 0.0;
+                }
+                else
+                {
+                    double scrollable = extW - viewW;
+                    hpTarget = scrollable > 0 ? Math.Min(100.0, Math.Max(0.0, value / scrollable * 100.0)) : 0.0;
+                }
+
+                ApplyUILinkageScrollPercent(inst, orientation, hpTarget, vpTarget, r);
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"UI联动滚动条控制失败: {ex.Message}", LogHelper.LogType.Warning);
+            }
+        }
+
+        /// <summary>
+        /// 滚动辅助按钮点击：按增量（DIP）滚动目标应用。
+        /// </summary>
+        private void OnUILinkageCanvasScrollStep(UILinkageCanvasInstance inst, Orientation orientation, double delta)
+        {
+            if (inst == null || !inst.Bound || inst.DocElement == null) return;
+
+            try
+            {
+                var r = GetUILinkageViewportRect(inst);
+                if (r.IsEmpty || r.Width <= 0 || r.Height <= 0) return;
+
+                double vp, hp, vs, hs;
+                if (inst.Kind == UILinkageTargetKind.SumatraPdf)
+                {
+                    GetUILinkageSumatraEffUnits(inst, r, out var effV, out var effH);
+                    if (!UILinkageScrollReader.TryGetSumatraScrollPercents(
+                            inst.CanvasHwnd, effV, effH, out vp, out hp, out vs, out hs, out _))
+                        return;
+                }
+                else
+                {
+                    if (!ReadWordScroll(inst.DocElement, out vp, out hp, out vs, out hs))
+                        return;
+                }
+
+                var dpi = VisualTreeHelper.GetDpi(this);
+                double viewW = r.Width / dpi.DpiScaleX;
+                double viewH = r.Height / dpi.DpiScaleY;
+
+                double hpTarget = ScrollPattern.NoScroll;
+                double vpTarget = ScrollPattern.NoScroll;
+                if (orientation == Orientation.Vertical)
+                {
+                    if (double.IsNaN(vp)) return;
+                    double extH = viewH * (vs > 0 && vs < 100 ? 100.0 / vs : 1.0);
+                    double scrollable = Math.Max(0, extH - viewH);
+                    if (scrollable <= 0) return;
+                    double value = vp / 100.0 * scrollable + delta;
+                    vpTarget = Math.Min(100.0, Math.Max(0.0, value / scrollable * 100.0));
+                }
+                else
+                {
+                    if (double.IsNaN(hp)) return;
+                    double extW = viewW * (hs > 0 && hs < 100 ? 100.0 / hs : 1.0);
+                    double scrollable = Math.Max(0, extW - viewW);
+                    if (scrollable <= 0) return;
+                    double value = hp / 100.0 * scrollable + delta;
+                    hpTarget = Math.Min(100.0, Math.Max(0.0, value / scrollable * 100.0));
+                }
+
+                ApplyUILinkageScrollPercent(inst, orientation, hpTarget, vpTarget, r);
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"UI联动滚动辅助失败: {ex.Message}", LogHelper.LogType.Warning);
+            }
+        }
+
+        /// <summary>
+        /// 把目标滚动百分比下发到目标应用：Word 调 ScrollPattern；SumatraPDF 发 Win32 滚动消息
+        /// （内部为读数反馈闭环，通常一两个消息内收敛；调用方在 UI 线程，与 Word 的跨进程
+        /// ScrollPattern 调用阻塞特性一致）。未作用的轴传 NoScroll（Word）/null（SumatraPDF）。
+        /// </summary>
+        private static void ApplyUILinkageScrollPercent(
+            UILinkageCanvasInstance inst, Orientation orientation, double hp, double vp, Rect viewportRect = default)
+        {
+            if (inst == null || !inst.Bound) return;
+
+            if (inst.Kind == UILinkageTargetKind.SumatraPdf)
+            {
+                if (inst.CanvasHwnd == IntPtr.Zero) return;
+                GetUILinkageSumatraEffUnits(inst, viewportRect, out var effV, out var effH);
+                double? v = orientation == Orientation.Vertical
+                    ? Math.Min(100.0, Math.Max(0.0, vp))
+                    : (double?)null;
+                double? h = orientation == Orientation.Horizontal
+                    ? Math.Min(100.0, Math.Max(0.0, hp))
+                    : (double?)null;
+                UILinkageScrollReader.TrySetSumatraScrollPercent(inst.CanvasHwnd, v, h, effV, effH);
+                return;
+            }
+
+            if (inst.DocElement == null) return;
+            if (inst.DocElement.TryGetCurrentPattern(ScrollPattern.Pattern, out var p) && p is ScrollPattern sp)
+                sp.SetScrollPercent(hp, vp);
+        }
+
+        // ---------------- 滚动位置记忆（按文档，json sidecar） ----------------
+
+        private static string GetUILinkageStatePath(string docName)
+        {
+            return Path.Combine(App.RootPath, "UILinkageInk", SanitizeFileName(docName) + ".state.json");
+        }
+
+        /// <summary>
+        /// 记忆当前状态：<paramref name="inst"/> 上进行过墨迹书写（Strokes 非空）时，
+        /// 把最近一次同步到的滚动百分比与缩放百分比写入文档名对应的 sidecar json。
+        /// 滚动百分比供滚动位置恢复；缩放百分比供载入历史墨迹时按比例重缩放。
+        /// </summary>
+        private void SaveUILinkageScrollPosition(UILinkageCanvasInstance inst)
+        {
+            try
+            {
+                var s = SettingsManager.Settings?.UILinkage;
+                if (s == null) return;
+                // 状态文件兼作墨迹对齐元数据（缩放记忆）：滚动记忆或墨迹自动保存任一开启即写入。
+                if (!s.RememberScrollPosition && !s.AutoSaveInk) return;
+                if (inst?.Canvas == null || string.IsNullOrWhiteSpace(inst.DocName)) return;
+                if (inst.Canvas.Strokes.Count == 0) return;
+                if (double.IsNaN(inst.LastVpPercent)) return;
+
+                var state = new UILinkageScrollState
+                {
+                    VerticalPercent = inst.LastVpPercent,
+                    HorizontalPercent = double.IsNaN(inst.LastHpPercent) ? 0 : inst.LastHpPercent,
+                    ZoomPercent = inst.LastZoomPercent,
+                    UpdatedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
+                };
+                var path = GetUILinkageStatePath(inst.DocName);
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                File.WriteAllText(path, JsonConvert.SerializeObject(state));
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"UI联动滚动位置记忆失败: {ex.Message}", LogHelper.LogType.Warning);
+            }
+        }
+
+        /// <summary>恢复上次滚动位置（sidecar json 存在时，后台滚动到记忆位置）。</summary>
+        private void RestoreUILinkageScrollPosition(UILinkageCanvasInstance inst)
+        {
+            try
+            {
+                var s = SettingsManager.Settings?.UILinkage;
+                if (s == null || !s.RememberScrollPosition) return;
+                if (inst?.DocElement == null || string.IsNullOrWhiteSpace(inst.DocName)) return;
+
+                var path = GetUILinkageStatePath(inst.DocName);
+                if (!File.Exists(path)) return;
+
+                var state = JsonConvert.DeserializeObject<UILinkageScrollState>(File.ReadAllText(path));
+                if (state == null || double.IsNaN(state.VerticalPercent)) return;
+
+                double vp = Math.Min(100.0, Math.Max(0.0, state.VerticalPercent));
+                double hp = Math.Min(100.0, Math.Max(0.0, state.HorizontalPercent));
+
+                if (inst.Kind == UILinkageTargetKind.SumatraPdf)
+                {
+                    // SumatraPDF：Win32 滚动消息反馈闭环，后台重试至到位。
+                    var canvasHwnd = inst.CanvasHwnd;
+                    if (canvasHwnd == IntPtr.Zero) return;
+                    GetUILinkageSumatraEffUnits(inst, GetUILinkageViewportRect(inst), out var effV, out var effH);
+                    _ = Task.Run(async () =>
+                    {
+                        for (int i = 0; i < 8; i++)
+                        {
+                            try
+                            {
+                                if (UILinkageScrollReader.TrySetSumatraScrollPercent(canvasHwnd, vp, hp, effV, effH))
+                                    return;
+                            }
+                            catch { }
+                            await Task.Delay(250);
+                        }
+                    });
+                    return;
+                }
+
+                var docEl = inst.DocElement;
+
+                _ = Task.Run(async () =>
+                {
+                    for (int i = 0; i < 8; i++)
+                    {
+                        try
+                        {
+                            if (docEl.TryGetCurrentPattern(ScrollPattern.Pattern, out var p) && p is ScrollPattern sp)
+                            {
+                                sp.SetScrollPercent(hp, vp);
+                                return;
+                            }
+                        }
+                        catch { }
+                        await Task.Delay(250);
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"UI联动滚动位置恢复失败: {ex.Message}", LogHelper.LogType.Warning);
+            }
+        }
+
+        // ---------------- 自动长截屏（墨迹区域，滚动拼接） ----------------
+
+        /// <summary>相邻截图切片的重叠比例（0.9 步距 → 10% 重叠，供拼接对齐）。</summary>
+        private const double UILinkageCaptureStepRatio = 0.9;
+
+        /// <summary>单次长截屏允许的最大切片数，防止超长文档失控。</summary>
+        private const int UILinkageMaxCapturePositions = 24;
+
+        /// <summary>一段长截屏的滚动区间（内容偏移 DIP：视口顶起点 / 终点）。</summary>
+        private sealed class UILinkageCaptureSnapshot
+        {
+            public UILinkageCanvasInstance Instance;
+            public Ink_Canvas.Controls.IndependentCanvas Canvas;
+            public UILinkageTargetKind Kind;
+            public AutomationElement DocElement;
+            public IntPtr CanvasHwnd;
+            public double EffUnitsV;
+            public double EffUnitsH;
+            public string DocName;
+            public Rect DocRect;
+            public List<Tuple<double, double>> Segments = new List<Tuple<double, double>>();
+            public Size View;
+            public Size Ext;
+            public Vector Offset;
+            public double Scrollable = 1;
+            public double OrigVp;
+            public double OrigHp;
+        }
+
+        /// <summary>
+        /// 对带墨迹的区域自动长截屏：从最顶一笔上延一块到最低一笔下延一块，
+        /// 间隔超过一块时分多段；每段按步距滚动截屏并纵向拼接为一张长图。
+        /// 保存路径与 PPT 联动自动截图一致，便于统一管理。
+        /// 返回是否已启动；启动后画布保留在屏幕上，由完成回调负责还原与移除。
+        /// </summary>
+        private bool StartUILinkageLongScreenshotCapture(UILinkageCanvasInstance inst)
+        {
+            try
+            {
+                if (inst?.Canvas == null || inst.IsCapturingLongScreenshot) return false;
+                var s = SettingsManager.Settings?.UILinkage;
+                if (s == null || !s.AutoLongScreenshot) return false;
+                if (IsInPPTPresentationMode) return false;
+                if (inst.Canvas.Strokes.Count == 0) return false;
+                if (double.IsNaN(inst.LastVpPercent) || inst.LastViewH <= 0 || inst.LastViewW <= 0) return false;
+                if (inst.LastExtH <= inst.LastViewH) return false;
+                if (!UILinkageWindowFinder.IsWindowAlive(inst.BoundHwnd)) return false;
+
+                var docRect = GetUILinkageViewportRect(inst);
+                if (docRect.IsEmpty || docRect.Width <= 0 || docRect.Height <= 0) return false;
+
+                // 烘焙未应用的滚动位移，让墨迹数据坐标与视觉一致后再取外接框。
+                inst.Canvas.FlushScrollAnimation();
+                var bounds = inst.Canvas.Strokes.GetBounds();
+                if (bounds.IsEmpty) return false;
+
+                var segments = BuildUILinkageCaptureSegments(inst.Canvas.Strokes, inst.LastViewH, inst.LastOffsetY, inst.LastExtH);
+                if (segments.Count == 0) return false;
+
+                double stepDip = inst.LastViewH * UILinkageCaptureStepRatio;
+                int totalPositions = 0;
+                foreach (var seg in segments)
+                    totalPositions += Math.Max(1, (int)Math.Ceiling((seg.Item2 - seg.Item1) / stepDip));
+                if (totalPositions > UILinkageMaxCapturePositions)
+                {
+                    LogHelper.WriteLogToFile(
+                        $"UI联动长截屏跳过：所需切片数 {totalPositions} 超过上限 {UILinkageMaxCapturePositions}",
+                        LogHelper.LogType.Info);
+                    return false;
+                }
+
+                inst.IsCapturingLongScreenshot = true;
+                inst.Canvas.BeginChromelessCapture();
+
+                var snapshot = new UILinkageCaptureSnapshot
+                {
+                    Instance = inst,
+                    Canvas = inst.Canvas,
+                    Kind = inst.Kind,
+                    DocElement = inst.DocElement,
+                    CanvasHwnd = inst.CanvasHwnd,
+                    EffUnitsV = inst.Kind == UILinkageTargetKind.SumatraPdf ? inst.SumatraUnitsPerPxV * docRect.Height : 0,
+                    EffUnitsH = inst.Kind == UILinkageTargetKind.SumatraPdf ? inst.SumatraUnitsPerPxH * docRect.Width : 0,
+                    DocName = inst.DocName,
+                    DocRect = docRect,
+                    Segments = segments,
+                    View = new Size(inst.LastViewW, inst.LastViewH),
+                    Ext = new Size(inst.LastExtW, inst.LastExtH),
+                    Offset = new Vector(inst.LastOffsetX, inst.LastOffsetY),
+                    Scrollable = Math.Max(1, inst.LastExtH - inst.LastViewH),
+                    OrigVp = inst.LastVpPercent,
+                    OrigHp = inst.LastHpPercent
+                };
+
+                _ = Task.Run(() => RunUILinkageLongScreenshotCapture(snapshot));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"UI联动长截屏启动失败: {ex.Message}", LogHelper.LogType.Warning);
+                if (inst != null)
+                {
+                    inst.IsCapturingLongScreenshot = false;
+                    inst.Canvas?.EndChromelessCapture();
+                }
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 把墨迹按内容坐标聚类分段：相邻墨迹簇间隔 ≥ 一块（视口高）则分段，
+        /// 每段上下各延伸一块，并夹取到可滚动范围内。返回视口顶偏移区间（DIP）。
+        /// </summary>
+        private static List<Tuple<double, double>> BuildUILinkageCaptureSegments(
+            StrokeCollection strokes, double viewH, double offsetY, double extH)
+        {
+            var ranges = new List<Tuple<double, double>>();
+            foreach (Stroke stroke in strokes)
+            {
+                var b = stroke.GetBounds();
+                if (b.IsEmpty || (b.Width <= 0 && b.Height <= 0)) continue;
+                ranges.Add(Tuple.Create(b.Top + offsetY, b.Bottom + offsetY));
+            }
+            if (ranges.Count == 0) return new List<Tuple<double, double>>();
+
+            ranges.Sort((a, b) => a.Item1.CompareTo(b.Item1));
+
+            var clusters = new List<Tuple<double, double>>();
+            double curTop = ranges[0].Item1, curBottom = ranges[0].Item2;
+            for (int i = 1; i < ranges.Count; i++)
+            {
+                var r = ranges[i];
+                if (r.Item1 - curBottom >= viewH)
+                {
+                    clusters.Add(Tuple.Create(curTop, curBottom));
+                    curTop = r.Item1;
+                    curBottom = r.Item2;
+                }
+                else
+                {
+                    curBottom = Math.Max(curBottom, r.Item2);
+                }
+            }
+            clusters.Add(Tuple.Create(curTop, curBottom));
+
+            double maxOffset = Math.Max(0, extH - viewH);
+            var segments = new List<Tuple<double, double>>();
+            foreach (var c in clusters)
+            {
+                // 上下各延伸一块（一块 = 视口高）：
+                // 起始视口顶 = 簇顶上延一块；终止视口顶 = 簇底（此时视口恰好覆盖到簇底下延一块）。
+                double top = Math.Max(0, Math.Min(maxOffset, c.Item1 - viewH));
+                double bottom = Math.Max(0, Math.Min(maxOffset, c.Item2));
+                segments.Add(Tuple.Create(top, Math.Max(top, bottom)));
+            }
+            return segments;
+        }
+
+        /// <summary>长截屏后台执行：滚动 → 等待稳定 → 截图 → 拼接 → 保存；完成后还原滚动与界面。</summary>
+        private async void RunUILinkageLongScreenshotCapture(UILinkageCaptureSnapshot snap)
+        {
+            var savedPaths = new List<string>();
+            try
+            {
+                double viewH = snap.View.Height;
+                double stepDip = viewH * UILinkageCaptureStepRatio;
+                double dpiScaleY = snap.DocRect.Height / Math.Max(1, viewH);
+                int sliceH = (int)Math.Round(snap.DocRect.Height);
+                int sliceW = (int)Math.Round(snap.DocRect.Width);
+                int imageIndex = 1;
+
+                foreach (var seg in snap.Segments)
+                {
+                    var slices = new List<System.Drawing.Bitmap>();
+                    try
+                    {
+                        var positions = new List<double>();
+                        for (double o = seg.Item1; o < seg.Item2 - 0.5; o += stepDip)
+                            positions.Add(o);
+                        if (positions.Count == 0) positions.Add(seg.Item1);
+                        if (positions[positions.Count - 1] + viewH < seg.Item2 - 0.5)
+                            positions.Add(seg.Item2 - viewH);
+
+                        foreach (var o in positions)
+                        {
+                            double targetVp = Math.Min(100.0, Math.Max(0.0, o / snap.Scrollable * 100.0));
+
+                            // 先把墨迹同步到目标偏移（与文档滚动一致），再滚动 Word。
+                            var canvas = snap.Canvas;
+                            var view = snap.View;
+                            var ext = snap.Ext;
+                            var offX = snap.Offset.X;
+                            await Dispatcher.InvokeAsync(() =>
+                                canvas?.SetScrollInfo(view, ext, new Vector(offX, o), animate: false));
+
+                            if (!await ScrollUILinkageTargetUntilAsync(snap, targetVp))
+                                break;
+
+                            await Task.Delay(140);
+                            var bmp = CaptureRectBitmap(snap.DocRect, sliceW, sliceH);
+                            if (bmp != null) slices.Add(bmp);
+                        }
+
+                        if (slices.Count == 0) continue;
+
+                        using var tall = StitchUILinkageSlices(slices, viewH, dpiScaleY);
+                        if (tall == null) continue;
+
+                        var path = GetUILinkageLongScreenshotPath(snap.DocName, imageIndex++);
+                        SaveUILinkageScreenshot(tall, path);
+                        savedPaths.Add(path);
+                    }
+                    finally
+                    {
+                        foreach (var bmp in slices) bmp.Dispose();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"UI联动长截屏执行失败: {ex.Message}", LogHelper.LogType.Warning);
+            }
+            finally
+            {
+                try
+                {
+                    // 还原墨迹位置 → 还原 Word 滚动 → 还原界面控件。
+                    var canvas = snap.Canvas;
+                    var view = snap.View;
+                    var ext = snap.Ext;
+                    var offset = snap.Offset;
+                    await Dispatcher.InvokeAsync(() =>
+                        canvas?.SetScrollInfo(view, ext, offset, animate: false));
+
+                    await RestoreUILinkageTargetScrollAsync(snap);
+
+                    bool shouldRemove = false;
+                    await Dispatcher.InvokeAsync(() =>
+                    {
+                        snap.Instance.IsCapturingLongScreenshot = false;
+                        canvas?.EndChromelessCapture();
+                        // 实例已解绑（解绑时为截图保留画布）→ 截图完成后移除控件。
+                        shouldRemove = !_uiLinkageInstances.Contains(snap.Instance);
+                        if (shouldRemove && canvas != null)
+                        {
+                            canvas.Visibility = Visibility.Collapsed;
+                            InkCanvasGridForInkReplay?.Children.Remove(canvas);
+                        }
+                    });
+
+                    if (savedPaths.Count > 0)
+                        LogHelper.WriteLogToFile(
+                            $"UI联动长截屏完成 {savedPaths.Count} 张（{snap.DocName}）", LogHelper.LogType.Info);
+                }
+                catch (Exception ex)
+                {
+                    LogHelper.WriteLogToFile($"UI联动长截屏收尾失败: {ex.Message}", LogHelper.LogType.Warning);
+                }
+            }
+        }
+
+        /// <summary>对所有已绑定实例尝试长截屏（退出批注、关闭联动时调用）。</summary>
+        internal void CaptureAllUILinkageLongScreenshots()
+        {
+            foreach (var inst in _uiLinkageInstances.ToList())
+                StartUILinkageLongScreenshotCapture(inst);
+        }
+
+        /// <summary>
+        /// 滚动目标应用直到竖直滚动百分比到位：SumatraPDF 走 Win32 滚动消息反馈闭环，
+        /// Word 轮询 ScrollPattern。
+        /// </summary>
+        private static async Task<bool> ScrollUILinkageTargetUntilAsync(UILinkageCaptureSnapshot snap, double targetVp)
+        {
+            if (snap == null) return false;
+
+            if (snap.Kind == UILinkageTargetKind.SumatraPdf)
+            {
+                if (snap.CanvasHwnd == IntPtr.Zero) return false;
+                // TrySetSumatraScrollPercent 内部自带读数反馈闭环，直接滚动到目标百分比。
+                double effV = snap.EffUnitsV;
+                return await Task.Run(() =>
+                {
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    while (sw.ElapsedMilliseconds < 1800)
+                    {
+                        if (UILinkageScrollReader.TrySetSumatraScrollPercent(snap.CanvasHwnd, targetVp, null, effV, 0))
+                            return true;
+                        System.Threading.Thread.Sleep(60);
+                    }
+                    return false;
+                });
+            }
+
+            return await ScrollWordUntilAsync(snap.DocElement, targetVp);
+        }
+
+        /// <summary>还原目标应用的滚动位置（长截屏收尾）：SumatraPDF 走 Win32 滚动消息，Word 走 ScrollPattern。</summary>
+        private static async Task RestoreUILinkageTargetScrollAsync(UILinkageCaptureSnapshot snap)
+        {
+            if (snap == null) return;
+
+            if (snap.Kind == UILinkageTargetKind.SumatraPdf)
+            {
+                if (snap.CanvasHwnd == IntPtr.Zero) return;
+                double? vp = double.IsNaN(snap.OrigVp) ? (double?)null : Math.Min(100.0, Math.Max(0.0, snap.OrigVp));
+                double? hp = double.IsNaN(snap.OrigHp) ? (double?)null : Math.Min(100.0, Math.Max(0.0, snap.OrigHp));
+                double effV = snap.EffUnitsV;
+                double effH = snap.EffUnitsH;
+                await Task.Run(() => UILinkageScrollReader.TrySetSumatraScrollPercent(snap.CanvasHwnd, vp, hp, effV, effH));
+                return;
+            }
+
+            await RestoreWordScrollAsync(snap.DocElement, snap.OrigVp, snap.OrigHp);
+        }
+
+        private static async Task<bool> ScrollWordUntilAsync(AutomationElement docEl, double targetVp)
+        {
+            if (docEl == null) return false;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < 1800)
+            {
+                try
+                {
+                    if (docEl.TryGetCurrentPattern(ScrollPattern.Pattern, out var p) && p is ScrollPattern sp)
+                    {
+                        double cur = sp.Current.VerticalScrollPercent;
+                        if (!double.IsNaN(cur) && Math.Abs(cur - targetVp) <= 0.4)
+                            return true;
+                        sp.SetScrollPercent(ScrollPattern.NoScroll, targetVp);
+                    }
+                    else
+                    {
+                        return false;
+                    }
+                }
+                catch
+                {
+                    return false;
+                }
+                await Task.Delay(70);
+            }
+            return false;
+        }
+
+        private static async Task RestoreWordScrollAsync(AutomationElement docEl, double vp, double hp)
+        {
+            if (docEl == null) return;
+            for (int i = 0; i < 6; i++)
+            {
+                try
+                {
+                    if (docEl.TryGetCurrentPattern(ScrollPattern.Pattern, out var p) && p is ScrollPattern sp)
+                    {
+                        sp.SetScrollPercent(
+                            double.IsNaN(hp) ? ScrollPattern.NoScroll : hp,
+                            double.IsNaN(vp) ? ScrollPattern.NoScroll : vp);
+                        return;
+                    }
+                }
+                catch { }
+                await Task.Delay(150);
+            }
+        }
+
+        private static System.Drawing.Bitmap CaptureRectBitmap(System.Windows.Rect physicalRect, int width, int height)
+        {
+            try
+            {
+                var bmp = new System.Drawing.Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                using (var g = System.Drawing.Graphics.FromImage(bmp))
+                {
+                    g.CopyFromScreen(
+                        (int)physicalRect.Left, (int)physicalRect.Top, 0, 0,
+                        new System.Drawing.Size(width, height),
+                        System.Drawing.CopyPixelOperation.SourceCopy);
+                }
+                return bmp;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>把按 0.9 步距重叠的切片纵向拼接为一张长图（重叠区灰度匹配对齐，失败时按期望重叠裁切）。</summary>
+        private static System.Drawing.Bitmap StitchUILinkageSlices(
+            List<System.Drawing.Bitmap> slices, double viewHDip, double dpiScaleY)
+        {
+            try
+            {
+                if (slices == null || slices.Count == 0) return null;
+                if (slices.Count == 1)
+                {
+                    return new System.Drawing.Bitmap(slices[0]);
+                }
+
+                int sliceH = slices[0].Height;
+                int sliceW = slices[0].Width;
+                int stepPx = (int)Math.Round(viewHDip * dpiScaleY * UILinkageCaptureStepRatio);
+                int expectedTrim = Math.Min(sliceH - 1, Math.Max(1, sliceH - stepPx));
+
+                int totalHeight = sliceH;
+                var trims = new int[slices.Count - 1];
+                for (int i = 1; i < slices.Count; i++)
+                {
+                    int trim = FindSliceOverlapTrim(slices[i - 1], slices[i], expectedTrim, 40);
+                    trims[i - 1] = trim;
+                    totalHeight += sliceH - trim;
+                }
+
+                var result = new System.Drawing.Bitmap(sliceW, totalHeight, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                using (var g = System.Drawing.Graphics.FromImage(result))
+                {
+                    int y = 0;
+                    g.DrawImage(slices[0], 0, 0);
+                    y += sliceH;
+                    for (int i = 1; i < slices.Count; i++)
+                    {
+                        y -= trims[i - 1];
+                        g.DrawImage(slices[i], 0, y);
+                        y += sliceH;
+                    }
+                }
+                return result;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>在期望裁切行附近按灰度 SAD 搜索相邻切片的最佳重叠行数。</summary>
+        private static int FindSliceOverlapTrim(System.Drawing.Bitmap prev, System.Drawing.Bitmap next, int expectedTrim, int searchRange)
+        {
+            try
+            {
+                int h = prev.Height, w = prev.Width;
+                int trimMin = Math.Max(1, expectedTrim - searchRange);
+                int trimMax = Math.Min(h - 1, expectedTrim + searchRange);
+                if (trimMax <= trimMin) return expectedTrim;
+
+                var prevGray = ToGrayStrip(prev, h - trimMax, trimMax);
+                var nextGray = ToGrayStrip(next, 0, trimMax);
+                int sw = prevGray.GetLength(1);
+
+                int best = expectedTrim;
+                long bestScore = long.MaxValue;
+                for (int t = trimMin; t <= trimMax; t++)
+                {
+                    int prevStart = trimMax - t; // prev 底部 t 行（条带内起始行）
+                    long score = 0;
+                    for (int y = 0; y < t; y += 2)
+                    {
+                        for (int x = 0; x < sw; x++)
+                        {
+                            int d = prevGray[prevStart + y, x] - nextGray[y, x];
+                            score += d < 0 ? -d : d;
+                        }
+                    }
+                    long rows = (t / 2 + 1) * (long)sw;
+                    score = score * 1000 / Math.Max(1, rows);
+                    if (score < bestScore)
+                    {
+                        bestScore = score;
+                        best = t;
+                    }
+                }
+                return best;
+            }
+            catch
+            {
+                return expectedTrim;
+            }
+        }
+
+        private static byte[,] ToGrayStrip(System.Drawing.Bitmap bmp, int startRow, int rowCount)
+        {
+            int w = bmp.Width;
+            const int XStep = 8;
+            int cols = Math.Max(1, w / XStep);
+            var gray = new byte[rowCount, cols];
+            var rect = new System.Drawing.Rectangle(0, startRow, w, rowCount);
+            var data = bmp.LockBits(rect, System.Drawing.Imaging.ImageLockMode.ReadOnly,
+                System.Drawing.Imaging.PixelFormat.Format24bppRgb);
+            try
+            {
+                int stride = data.Stride;
+                var rowBytes = new byte[stride];
+                for (int y = 0; y < rowCount; y++)
+                {
+                    System.Runtime.InteropServices.Marshal.Copy(
+                        new IntPtr(data.Scan0.ToInt64() + y * stride), rowBytes, 0, stride);
+                    for (int c = 0; c < cols; c++)
+                    {
+                        int x = c * XStep * 3;
+                        if (x + 2 < rowBytes.Length)
+                            gray[y, c] = (byte)((rowBytes[x] + rowBytes[x + 1] + rowBytes[x + 2]) / 3);
+                    }
+                }
+            }
+            finally
+            {
+                bmp.UnlockBits(data);
+            }
+            return gray;
+        }
+
+        /// <summary>长截屏保存路径：与 PPT 联动自动截图一致（日期文件夹/自定义目录）。</summary>
+        private string GetUILinkageLongScreenshotPath(string docName, int index)
+        {
+            var stem = $"{SanitizeFileName(docName)} 长截图 {DateTime.Now:HH-mm-ss} {index:00}";
+            if (Settings.Automation.IsSaveScreenshotsInDateFolders)
+                return GetDateFolderPath(stem);
+            return Path.Combine(GetScreenshotSaveDirectory(), stem + Helpers.ScreenshotImageSaveHelper.GetExtension());
+        }
+
+        private static void SaveUILinkageScreenshot(System.Drawing.Bitmap bitmap, string path)
+        {
+            var dir = Path.GetDirectoryName(path);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                Directory.CreateDirectory(dir);
+            Helpers.ScreenshotImageSaveHelper.Save(bitmap, path);
+            LogHelper.WriteLogToFile($"UI联动长截屏已保存: {path}", LogHelper.LogType.Info);
+            _ = Task.Run(async () =>
+            {
+                try { await Helpers.UploadHelper.UploadFileAsync(path); }
+                catch { }
+            });
+        }
+
+        /// <summary>
+        /// 从目标窗口标题提取文档名（去掉应用后缀）。Word 与 SumatraPDF 的文件名都在
+        /// 顶层窗口标题上（形如「文档.pdf - SumatraPDF」）。读取失败返回 false。
+        /// </summary>
+        private static bool TryComputeUILinkageDocName(AutomationElement windowEl, out string docName)
+        {
+            docName = null;
+            try
+            {
+                var name = windowEl?.Current.Name;
+                if (string.IsNullOrWhiteSpace(name)) return false;
+
+                foreach (var suffix in new[] { " - Word", " - Microsoft Word", "- Word", " - SumatraPDF", " - Sumatra PDF" })
+                {
+                    if (name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+                    {
+                        name = name.Substring(0, name.Length - suffix.Length).Trim();
+                        break;
+                    }
+                }
+                docName = name;
+                return !string.IsNullOrWhiteSpace(docName);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static string SanitizeFileName(string name)
+        {
+            foreach (var c in Path.GetInvalidFileNameChars())
+                name = name.Replace(c, '_');
+            return name;
+        }
+
+        private static string GetUILinkageInkPath(string docName)
+        {
+            return Path.Combine(App.RootPath, "UILinkageInk", SanitizeFileName(docName) + ".isf");
+        }
+
+        private void SaveUILinkageInk(UILinkageCanvasInstance inst)
+        {
+            if (inst?.Canvas == null) return;
+            if (string.IsNullOrWhiteSpace(inst.DocName)) return;
+
+            // 自动保存墨迹开关（与 PPT 联动的自动保存行为对齐）。
+            var s = SettingsManager.Settings?.UILinkage;
+            if (s == null || !s.AutoSaveInk) return;
+
+            try
+            {
+                // 先烘焙未应用的滚动位移，保证保存的坐标与当前视觉一致。
+                inst.Canvas.FlushScrollAnimation();
+
+                // 墨迹按「内容锚定」保存：克隆笔迹（不动画布内正在使用的墨迹，解绑截图
+                // 仍需原坐标渲染）并平移 +当前偏移，使保存数据以文档内容左上角为原点。
+                // 载入后无论 Word 当前滚动到哪里，首轮滚动同步即可对齐，不受保存时
+                // 滚动位置影响；配合 state json 的缩放记忆可在缩放比例变化后重缩放。
+                var contentAnchored = inst.Canvas.Strokes.Clone();
+                var offset = inst.Canvas.AppliedScrollOffset;
+                var bake = new Matrix(1, 0, 0, 1, offset.X, offset.Y);
+                foreach (Stroke stroke in contentAnchored)
+                    stroke.Transform(bake, false);
+
+                var path = GetUILinkageInkPath(inst.DocName);
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                using (var fs = new FileStream(path, FileMode.Create, FileAccess.Write))
+                    contentAnchored.Save(fs);
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"UI联动墨迹保存失败: {ex.Message}", LogHelper.LogType.Warning);
+            }
+        }
+
+        private void LoadUILinkageInk(UILinkageCanvasInstance inst)
+        {
+            if (inst?.Canvas == null) return;
+            if (string.IsNullOrWhiteSpace(inst.DocName)) return;
+
+            // 重置载入元数据（换文档重载时旧元数据失效）。
+            inst.LoadedInkStrokes = null;
+            inst.SavedZoomPercent = double.NaN;
+
+            // 自动保存墨迹开关（关闭时不加载历史墨迹）。
+            var s = SettingsManager.Settings?.UILinkage;
+            if (s == null || !s.AutoSaveInk) return;
+
+            try
+            {
+                var path = GetUILinkageInkPath(inst.DocName);
+                if (!File.Exists(path)) return;
+
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read))
+                {
+                    var loaded = new StrokeCollection(fs);
+
+                    // 记录载入笔迹与保存时缩放：首次读到当前缩放时按比例重缩放这批墨迹，
+                    // 保证两次批注之间 Word 缩放变化过的情况下历史墨迹仍对齐文档内容。
+                    inst.LoadedInkStrokes = loaded.ToList();
+                    inst.SavedZoomPercent = ReadUILinkageSavedZoomPercent(inst.DocName);
+
+                    inst.Canvas.Strokes.Add(loaded);
+                }
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"UI联动墨迹加载失败: {ex.Message}", LogHelper.LogType.Warning);
+            }
+        }
+
+        /// <summary>读取按文档记忆的保存时缩放百分比（state json）。缺失/无效返回 NaN。</summary>
+        private static double ReadUILinkageSavedZoomPercent(string docName)
+        {
+            try
+            {
+                var path = GetUILinkageStatePath(docName);
+                if (!File.Exists(path)) return double.NaN;
+                var state = JsonConvert.DeserializeObject<UILinkageScrollState>(File.ReadAllText(path));
+                return state?.ZoomPercent ?? double.NaN;
+            }
+            catch
+            {
+                return double.NaN;
+            }
+        }
+
+        #endregion
+
+        // ---------------- 独立画布与橡皮擦/工具的衔接 ----------------
+
+        internal bool IsUILinkageCanvasBound => _uiLinkageInstances.Any(i => i.Bound);
+
+        /// <summary>橡皮擦当前作用的独立画布实例（首次移动时按点位解析）。</summary>
+        private UILinkageCanvasInstance _uiLinkageEraseInstance;
+
+        /// <summary>独立画布当前墨迹（供橡皮擦等复用主画布逻辑时使用）；未解析到实例返回 null。</summary>
+        internal StrokeCollection GetUILinkageStrokes()
+            => _uiLinkageEraseInstance?.Canvas?.Strokes;
+
+        /// <summary>按点位解析橡皮擦作用的实例（主画布坐标）。</summary>
+        internal bool TryResolveUILinkageEraseInstance(Point inkCanvasPoint, out UILinkageCanvasInstance instance)
+            => TryGetUILinkageInstanceAt(inkCanvasPoint, out instance);
     }
 }

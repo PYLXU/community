@@ -303,4 +303,7 @@
   <data name="SmartModeHint" xml:space="preserve">
     <value>Auto-detect video controls in PPT slides; switch to pointer mode when the cursor enters a video region, and restore annotation mode when it leaves</value>
   </data>
+  <data name="LinkageGroupTitle" xml:space="preserve">
+    <value>Linkage</value>
+  </data>
 </root>

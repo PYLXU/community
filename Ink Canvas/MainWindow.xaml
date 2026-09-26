@@ -371,25 +371,33 @@
                     Visibility="Collapsed"  d:Visibility="Visible"
                     Panel.ZIndex="1001"/>
 
-            <!-- UI 联动调试面板：叠加在画布层，实时展示 UIAutomation 定位与墨迹采集点信息。 -->
-            <Border x:Name="UILinkageDebugHud"
+            <!-- UI 联动调试：临时高亮边框，标记首笔捕捉到的组件（显示宽高/位置/滚动）。 -->
+            <Border x:Name="UILinkageDebugHighlight"
                     HorizontalAlignment="Left"
                     VerticalAlignment="Top"
-                    Margin="16,16,0,0"
-                    Padding="12,10"
-                    CornerRadius="8"
-                    Background="#CC101820"
-                    BorderBrush="#50FFFFFF"
-                    BorderThickness="1"
                     IsHitTestVisible="False"
                     Visibility="Collapsed"
-                    Panel.ZIndex="1002">
-                <TextBlock x:Name="UILinkageDebugHudText"
+                    BorderBrush="#FF2563EB"
+                    BorderThickness="2"
+                    CornerRadius="2"
+                    Panel.ZIndex="501">
+                <TextBlock x:Name="UILinkageDebugHighlightText"
+                           HorizontalAlignment="Left"
+                           VerticalAlignment="Top"
+                           Margin="4"
+                           Padding="4,2"
                            FontFamily="Consolas"
-                           FontSize="12"
-                           Foreground="#F0FFFFFF"
+                           FontSize="11"
+                           Foreground="White"
+                           Background="#CC101820"
                            TextWrapping="NoWrap" />
             </Border>
+
+            <!-- UI 联动调试：被遮挡区域红色高亮框（动态生成，位于高亮边框之下）。 -->
+            <Canvas x:Name="UILinkageDebugOcclusionLayer"
+                    IsHitTestVisible="False"
+                    Visibility="Collapsed"
+                    Panel.ZIndex="500" />
         </Grid>
         <Canvas x:Name="WhiteboardTipsOverlayCanvas" IsHitTestVisible="False">
             <ikw:SimpleStackPanel Canvas.Left="25" Canvas.Top="15" Orientation="Vertical">
@@ -1546,5 +1554,47 @@
                 </Border>
             </Border>
         </Grid>
+
+        <!-- UI 联动调试面板：组件信息、可选完整组件树、上移一个容器、一键复制。
+             放在 Main_Grid 顶层，避免随 InkCanvasGridForInkReplay 在非批注状态被置 IsHitTestVisible=false。 -->
+        <Border x:Name="UILinkageDebugHud"
+                HorizontalAlignment="Left"
+                VerticalAlignment="Top"
+                Margin="16,16,0,0"
+                Padding="12,10"
+                CornerRadius="8"
+                Background="#CC101820"
+                BorderBrush="#50FFFFFF"
+                BorderThickness="1"
+                Visibility="Collapsed"
+                Panel.ZIndex="1002">
+            <StackPanel MaxWidth="620">
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                    <Button x:Name="UILinkageMoveUpButton"
+                            Content="上移容器"
+                            Margin="0,0,10,0"
+                            Padding="10,4"
+                            Click="UILinkageMoveUp_Click"/>
+                    <Button x:Name="UILinkageCopyButton"
+                            Content="一键复制"
+                            Margin="0,0,10,0"
+                            Padding="10,4"
+                            Click="UILinkageCopy_Click"/>
+                    <CheckBox x:Name="UILinkageShowTreeCheck"
+                              Content="显示完整组件树"
+                              Foreground="White"
+                              VerticalAlignment="Center"
+                              Checked="UILinkageShowTree_Changed"
+                              Unchecked="UILinkageShowTree_Changed"/>
+                </StackPanel>
+                <ScrollViewer MaxHeight="340" VerticalScrollBarVisibility="Auto">
+                    <TextBlock x:Name="UILinkageDebugHudText"
+                               FontFamily="Consolas"
+                               FontSize="12"
+                               Foreground="#F0FFFFFF"
+                               TextWrapping="Wrap" />
+                </ScrollViewer>
+            </StackPanel>
+        </Border>
     </Grid>
 </helpers:PerformanceTransparentWin>

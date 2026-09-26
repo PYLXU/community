@@ -52,7 +52,7 @@
     <value>启用 UI 联动</value>
   </data>
   <data name="MasterToggleHint" xml:space="preserve">
-    <value>开启后在批注模式书写时，自动通过 UIAutomation 定位下方应用组件并创建联动画布（当前仅支持 Word）</value>
+    <value>开启后在批注模式书写时，自动定位下方应用的文档视口并创建联动画布（当前支持 Word、SumatraPDF）</value>
   </data>
   <data name="Word" xml:space="preserve">
     <value>Microsoft Word</value>
@@ -60,10 +60,37 @@
   <data name="WordHint" xml:space="preserve">
     <value>在 Word 中书写时，跟踪文档编辑区域并联动批注墨迹</value>
   </data>
+  <data name="SumatraPdf" xml:space="preserve">
+    <value>SumatraPDF</value>
+  </data>
+  <data name="SumatraPdfHint" xml:space="preserve">
+    <value>在 SumatraPDF 中书写时，跟踪文档渲染区域并联动批注墨迹（支持滚动跟随与自动长截屏）</value>
+  </data>
   <data name="DebugToggle" xml:space="preserve">
     <value>调试面板</value>
   </data>
   <data name="DebugToggleHint" xml:space="preserve">
     <value>在画布层显示 UI 联动调试面板，实时展示命中的应用组件与墨迹采集点（起始点即采集点）</value>
+  </data>
+  <data name="AutomationGroupHeader" xml:space="preserve">
+    <value>自动功能</value>
+  </data>
+  <data name="RememberScrollPosition" xml:space="preserve">
+    <value>自动记忆上次滚动位置</value>
+  </data>
+  <data name="RememberScrollPositionHint" xml:space="preserve">
+    <value>仅当进行过墨迹书写时记忆；重新打开同一文档时自动恢复到上次位置</value>
+  </data>
+  <data name="AutoSaveInk" xml:space="preserve">
+    <value>自动保存并加载墨迹</value>
+  </data>
+  <data name="AutoSaveInkHint" xml:space="preserve">
+    <value>按文档名自动保存联动画布墨迹，重新打开文档时自动加载</value>
+  </data>
+  <data name="AutoLongScreenshot" xml:space="preserve">
+    <value>自动长截屏（墨迹区域）</value>
+  </data>
+  <data name="AutoLongScreenshotHint" xml:space="preserve">
+    <value>退出批注或关闭联动时，对带墨迹的区域滚动截屏：顶部/底部各延伸一块，间隔较大时分多张图片</value>
   </data>
 </root>

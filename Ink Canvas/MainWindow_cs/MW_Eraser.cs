@@ -18,6 +18,9 @@ namespace Ink_Canvas
         // 橡皮擦系统核心变量
         public bool isUsingGeometryEraser = false;
         private IncrementalStrokeHitTester hitTester = null;
+        private IncrementalStrokeHitTester uiLinkageHitTester = null;
+        /// <summary>按下时暂存的橡皮擦形状（UI 联动独立画布命中测试器延迟创建时使用）。</summary>
+        private StylusShape _uiLinkageEraserShape;
 
         public double eraserWidth = 64;
         public bool isEraserCircleShape = false;
@@ -140,6 +143,12 @@ namespace Ink_Canvas
             hitTester = inkCanvas.Strokes.GetIncrementalStrokeHitTester(eraserShape);
             hitTester.StrokeHit += EraserGeometry_StrokeHit;
 
+            // UI 联动：独立画布实例在首次移动时按点位解析（支持多实例），再为其墨迹
+            // 建立独立的增量命中测试器，使面积擦同样作用于其上。
+            _uiLinkageEraserShape = eraserShape;
+            uiLinkageHitTester = null;
+            _uiLinkageEraseInstance = null;
+
             // 计算缩放矩阵
             var scaleX = eraserWidth / 38;
             var scaleY = _h / 56;
@@ -185,6 +194,12 @@ namespace Ink_Canvas
                 CommitPendingSecAgentEraseHistory();
             }
 
+            if (uiLinkageHitTester != null)
+            {
+                uiLinkageHitTester.EndHitTesting();
+                uiLinkageHitTester = null;
+            }
+
             // 提交橡皮擦历史记录
             CommitPendingSecAgentEraseHistory();
             CommitPendingGeometryEraseHistory();
@@ -218,8 +233,10 @@ namespace Ink_Canvas
                 // 笔画橡皮擦模式
                 var _filtered = inkCanvas.Strokes.HitTest(pt).Where(stroke => !stroke.ContainsPropertyData(FrozenStrokePropertyGuid));
                 var filtered = _filtered as Stroke[] ?? _filtered.ToArray();
-                if (!filtered.Any()) return;
-                inkCanvas.Strokes.Remove(new StrokeCollection(filtered));
+                if (filtered.Any())
+                    inkCanvas.Strokes.Remove(new StrokeCollection(filtered));
+
+                EraseUILinkageStrokeAt(pt);
             }
             else
             {
@@ -242,7 +259,52 @@ namespace Ink_Canvas
                 {
                     hitTester.AddPoint(pt);
                 }
+
+                // 独立画布面积擦：首次移动按点位解析实例（多实例），后续换算到其本地坐标。
+                if (uiLinkageHitTester == null
+                    && _uiLinkageEraserShape != null
+                    && TryResolveUILinkageEraseInstance(pt, out var resolved))
+                {
+                    _uiLinkageEraseInstance = resolved;
+                    uiLinkageHitTester = resolved.Canvas.Strokes.GetIncrementalStrokeHitTester(_uiLinkageEraserShape);
+                    uiLinkageHitTester.StrokeHit += UILinkageEraser_StrokeHit;
+                }
+
+                if (uiLinkageHitTester != null
+                    && TryGetUILinkageLocalPoint(pt, _uiLinkageEraseInstance, out var uiLocal))
+                {
+                    uiLinkageHitTester.AddPoint(uiLocal);
+                }
             }
+        }
+
+        /// <summary>笔画橡皮擦（线擦）在独立画布上擦除命中的墨迹（按点位解析多实例）。</summary>
+        private void EraseUILinkageStrokeAt(Point pt)
+        {
+            if (!TryResolveUILinkageEraseInstance(pt, out var inst) || inst?.Canvas == null) return;
+            if (!TryGetUILinkageLocalPoint(pt, inst, out var local)) return;
+
+            var hits = inst.Canvas.Strokes.HitTest(local)
+                .Where(stroke => !stroke.ContainsPropertyData(FrozenStrokePropertyGuid))
+                .ToArray();
+            if (hits.Length > 0)
+                inst.Canvas.Strokes.Remove(new StrokeCollection(hits));
+        }
+
+        /// <summary>独立画布面积擦的命中回调：与主画布几何擦除一致，仅作用于当前实例 Strokes。</summary>
+        private void UILinkageEraser_StrokeHit(object sender, StrokeHitEventArgs args)
+        {
+            var uiStrokes = _uiLinkageEraseInstance?.Canvas?.Strokes;
+            if (uiStrokes == null) return;
+
+            StrokeCollection eraseResult = args.GetPointEraseResults();
+            StrokeCollection strokesToReplace = new StrokeCollection { args.HitStroke };
+
+            var filtered = eraseResult.Where(stroke => !stroke.ContainsPropertyData(FrozenStrokePropertyGuid)).ToArray();
+            if (filtered.Length > 0)
+                uiStrokes.Replace(strokesToReplace, new StrokeCollection(filtered));
+            else
+                uiStrokes.Remove(strokesToReplace);
         }
 
         /// <summary>
@@ -718,6 +780,11 @@ namespace Ink_Canvas
                 {
                     hitTester.EndHitTesting();
                     hitTester = null;
+                }
+                if (uiLinkageHitTester != null)
+                {
+                    uiLinkageHitTester.EndHitTesting();
+                    uiLinkageHitTester = null;
                 }
             }
 

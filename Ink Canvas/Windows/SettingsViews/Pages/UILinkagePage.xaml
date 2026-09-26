@@ -43,6 +43,33 @@
                             IsEnabled="{Binding IsOn, ElementName=CardUILinkageMaster}"
                             Toggled="CardUILinkageWord_Toggled"/>
 
+                    <controls:LabeledSettingsCard x:Name="CardUILinkageSumatraPdf"
+                            Header="{x:Static props:UILinkageStrings.SumatraPdf}"
+                            Description="{x:Static props:UILinkageStrings.SumatraPdfHint}"
+                            Icon="{x:Static ui:SegoeFluentIcons.PDF}"
+                            IsEnabled="{Binding IsOn, ElementName=CardUILinkageMaster}"
+                            Toggled="CardUILinkageSumatraPdf_Toggled"/>
+
+                    <TextBlock Text="{x:Static props:UILinkageStrings.AutomationGroupHeader}" Style="{StaticResource SettingsSectionHeaderTextBlockStyle}"/>
+
+                    <controls:LabeledSettingsCard x:Name="CardUILinkageRememberScroll"
+                            Header="{x:Static props:UILinkageStrings.RememberScrollPosition}"
+                            Description="{x:Static props:UILinkageStrings.RememberScrollPositionHint}"
+                            Icon="{x:Static ui:SegoeFluentIcons.History}"
+                            Toggled="CardUILinkageRememberScroll_Toggled"/>
+
+                    <controls:LabeledSettingsCard x:Name="CardUILinkageAutoSaveInk"
+                            Header="{x:Static props:UILinkageStrings.AutoSaveInk}"
+                            Description="{x:Static props:UILinkageStrings.AutoSaveInkHint}"
+                            Icon="{x:Static ui:SegoeFluentIcons.Save}"
+                            Toggled="CardUILinkageAutoSaveInk_Toggled"/>
+
+                    <controls:LabeledSettingsCard x:Name="CardUILinkageAutoLongScreenshot"
+                            Header="{x:Static props:UILinkageStrings.AutoLongScreenshot}"
+                            Description="{x:Static props:UILinkageStrings.AutoLongScreenshotHint}"
+                            Icon="{x:Static ui:SegoeFluentIcons.Camera}"
+                            Toggled="CardUILinkageAutoLongScreenshot_Toggled"/>
+
                     <controls:LabeledSettingsCard x:Name="CardUILinkageDebug"
                             Header="{x:Static props:UILinkageStrings.DebugToggle}"
                             Description="{x:Static props:UILinkageStrings.DebugToggleHint}"

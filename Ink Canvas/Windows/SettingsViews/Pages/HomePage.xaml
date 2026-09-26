@@ -165,11 +165,18 @@
                     </ui:SettingsCard>
 
                     <TextBlock Style="{StaticResource SettingsSectionHeaderTextBlockStyle}"
-                        Text="{x:Static props:PPTStrings.GroupTitle}" />
+                        Text="{x:Static props:PPTStrings.LinkageGroupTitle}" />
                     <ui:SettingsCard Header="{x:Static props:PPTStrings.GroupTitle}" Description="{x:Static props:HomeStrings.Home_PPTSettings}"
                         IsClickEnabled="True" Click="QuickNavCard_Click" Tag="PowerPointPage">
                         <ui:SettingsCard.HeaderIcon>
                             <ui:FontIcon Icon="{x:Static ui:SegoeFluentIcons.Slideshow}" />
+                        </ui:SettingsCard.HeaderIcon>
+                    </ui:SettingsCard>
+
+                    <ui:SettingsCard Header="{x:Static props:UILinkageStrings.GroupTitle}" Description="{x:Static props:NavStrings.Nav_UILinkage_Tooltip}"
+                        IsClickEnabled="True" Click="QuickNavCard_Click" Tag="UILinkagePage">
+                        <ui:SettingsCard.HeaderIcon>
+                            <ui:FontIcon Icon="{x:Static ui:SegoeFluentIcons.Link}" />
                         </ui:SettingsCard.HeaderIcon>
                     </ui:SettingsCard>
 

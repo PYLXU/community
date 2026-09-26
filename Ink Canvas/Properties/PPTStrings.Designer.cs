@@ -78,6 +78,8 @@ namespace Ink_Canvas.Properties
 
         public static string GroupTitle => ResourceManager.GetString(nameof(GroupTitle), _resourceCulture);
 
+        public static string LinkageGroupTitle => ResourceManager.GetString(nameof(LinkageGroupTitle), _resourceCulture);
+
         public static string HalfOpacity => ResourceManager.GetString(nameof(HalfOpacity), _resourceCulture);
 
         public static string KillWppHint => ResourceManager.GetString(nameof(KillWppHint), _resourceCulture);
