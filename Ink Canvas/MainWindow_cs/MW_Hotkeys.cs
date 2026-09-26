@@ -265,7 +265,7 @@ namespace Ink_Canvas
         {
             try
             {
-                SymbolIconUndo_MouseUp(lastBorderMouseDownObject, null);
+                SymbolIconUndo_MouseUp(lastBorderMouseDownObject, null, fromHotkey: true);
             }
             catch (Exception ex) { System.Diagnostics.Debug.WriteLine(ex); }
         }
@@ -279,7 +279,7 @@ namespace Ink_Canvas
         {
             try
             {
-                SymbolIconRedo_MouseUp(lastBorderMouseDownObject, null);
+                SymbolIconRedo_MouseUp(lastBorderMouseDownObject, null, fromHotkey: true);
             }
             catch (Exception ex) { System.Diagnostics.Debug.WriteLine(ex); }
         }

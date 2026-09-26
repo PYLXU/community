@@ -171,11 +171,12 @@ namespace Ink_Canvas
                         ShowNotification(Properties.MainWindowStrings.Main_Uri_ClearInkAndHistory);
                         return;
                     case "undo":
-                        SymbolIconUndo_MouseUp(null, null);
+                        // 与 Ctrl+Z 同语义：按「最近落笔的画布」分派。
+                        SymbolIconUndo_MouseUp(null, null, fromHotkey: true);
                         ShowNotification(Properties.MainWindowStrings.Main_Uri_Undo);
                         return;
                     case "redo":
-                        SymbolIconRedo_MouseUp(null, null);
+                        SymbolIconRedo_MouseUp(null, null, fromHotkey: true);
                         ShowNotification(Properties.MainWindowStrings.Main_Uri_Redo);
                         return;
                     case "nextpage":

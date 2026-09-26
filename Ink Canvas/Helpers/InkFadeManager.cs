@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Ink;
@@ -12,6 +13,43 @@ using System.Windows.Threading;
 
 namespace Ink_Canvas.Helpers
 {
+    /// <summary>
+    /// 渐隐视觉的宿主容器：决定渐隐 Path（及分段容器）挂到哪个容器、从哪个容器移除。
+    /// <para>
+    /// 主画布使用「<c>inkCanvas.Parent</c> 面板（回退 <c>inkCanvas.Children</c>）」，
+    /// UI 联动独立画布使用其内部与笔迹同坐标系的渐隐层。
+    /// 通过该宿主，同一个 <see cref="InkFadeManager"/> 可以同时服务两块画布，
+    /// 而不必为独立画布复制一套渐隐动画实现。
+    /// </para>
+    /// </summary>
+    public sealed class InkFadeVisualHost
+    {
+        private readonly UIElementCollection _container;
+
+        public InkFadeVisualHost(UIElementCollection container)
+        {
+            _container = container;
+        }
+
+        /// <summary>宿主是否可用（容器为空或已释放时不可用）。</summary>
+        public bool IsAvailable => _container != null;
+
+        public void Add(UIElement visual)
+        {
+            if (visual == null || _container == null) return;
+            if (!_container.Contains(visual)) _container.Add(visual);
+        }
+
+        public void Remove(UIElement visual)
+        {
+            if (visual == null || _container == null) return;
+            if (_container.Contains(visual)) _container.Remove(visual);
+        }
+
+        public bool Contains(UIElement visual)
+            => visual != null && _container != null && _container.Contains(visual);
+    }
+
     /// <summary>
     /// 墨迹渐隐管理器 - 管理墨迹的渐隐动画和状态
     /// </summary>
@@ -46,6 +84,8 @@ namespace Ink_Canvas.Helpers
         private readonly Dictionary<Stroke, Point> _strokeStartPoints;
         private readonly Dictionary<Stroke, Point> _strokeEndPoints;
         private readonly Dictionary<Stroke, int> _strokeAnimationDurations;
+        /// <summary>每条渐隐笔迹的视觉宿主（主画布 / UI 联动独立画布）。未记录时回退主画布宿主。</summary>
+        private readonly Dictionary<Stroke, InkFadeVisualHost> _strokeHosts;
         #endregion
 
         #region Constructor
@@ -58,6 +98,29 @@ namespace Ink_Canvas.Helpers
             _strokeStartPoints = new Dictionary<Stroke, Point>();
             _strokeEndPoints = new Dictionary<Stroke, Point>();
             _strokeAnimationDurations = new Dictionary<Stroke, int>();
+            _strokeHosts = new Dictionary<Stroke, InkFadeVisualHost>();
+        }
+        #endregion
+
+        #region Visual host
+        /// <summary>
+        /// 主画布的默认渐隐视觉宿主：优先挂到 <c>inkCanvas.Parent</c> 面板（与墨迹同一坐标系），
+        /// 无面板时退回 <c>inkCanvas.Children</c>。行为与历史实现一致。
+        /// </summary>
+        private InkFadeVisualHost ResolveDefaultHost()
+        {
+            var parent = _mainWindow?.inkCanvas?.Parent as Panel;
+            if (parent != null) return new InkFadeVisualHost(parent.Children);
+            if (_mainWindow?.inkCanvas != null) return new InkFadeVisualHost(_mainWindow.inkCanvas.Children);
+            return null;
+        }
+
+        /// <summary>取某条笔迹的渐隐视觉宿主；未显式指定时使用主画布宿主。</summary>
+        private InkFadeVisualHost GetHost(Stroke stroke)
+        {
+            if (stroke != null && _strokeHosts.TryGetValue(stroke, out var host) && host != null)
+                return host;
+            return ResolveDefaultHost();
         }
         #endregion
 
@@ -68,7 +131,12 @@ namespace Ink_Canvas.Helpers
         /// <param name="stroke">墨迹对象</param>
         /// <param name="startPoint">落笔点</param>
         /// <param name="endPoint">抬笔点</param>
-        public void AddFadingStroke(Stroke stroke, Point startPoint, Point endPoint, long strokeDurationMs = 0)
+        /// <param name="host">
+        /// 渐隐视觉宿主。为 null 时使用主画布宿主（<c>inkCanvas</c>）；UI 联动独立画布
+        /// 传入自己的渐隐层，使同一管理器可服务两块画布。
+        /// </param>
+        public void AddFadingStroke(Stroke stroke, Point startPoint, Point endPoint, long strokeDurationMs = 0,
+            InkFadeVisualHost host = null)
         {
             if (!IsEnabled || stroke == null)
             {
@@ -77,7 +145,22 @@ namespace Ink_Canvas.Helpers
 
             try
             {
-                if (_mainWindow.inkCanvas.EditingMode != InkCanvasEditingMode.Ink)
+                // 只有主画布笔迹才需要强制主画布回到画笔模式；独立画布的编辑模式由宿主
+                // 的 250ms 状态同步下发，这里不得越权改动（否则会打断橡皮擦等工具）。
+                var isMainCanvasStroke = host == null;
+
+                var visualHost = host ?? ResolveDefaultHost();
+                if (visualHost == null || !visualHost.IsAvailable)
+                {
+                    LogHelper.WriteLogToFile("渐隐墨迹无可用视觉宿主，已跳过", LogHelper.LogType.Warning);
+                    return;
+                }
+
+                _strokeHosts[stroke] = visualHost;
+
+                if (isMainCanvasStroke
+                    && _mainWindow.inkCanvas != null
+                    && _mainWindow.inkCanvas.EditingMode != InkCanvasEditingMode.Ink)
                 {
                     _mainWindow.inkCanvas.EditingMode = InkCanvasEditingMode.Ink;
                 }
@@ -126,21 +209,9 @@ namespace Ink_Canvas.Helpers
                 {
                     try
                     {
-                        if (_mainWindow.inkCanvas != null)
-                        {
-                            // 将墨迹添加到 inkCanvas 的父容器中，而不是 inkCanvas.Children
-                            // 这样可以避免坐标系统问题
-                            var parent = _mainWindow.inkCanvas.Parent as Panel;
-                            if (parent != null)
-                            {
-                                parent.Children.Add(strokeVisual);
-                            }
-                            else
-                            {
-                                // 如果无法获取父容器，则添加到 inkCanvas.Children
-                                _mainWindow.inkCanvas.Children.Add(strokeVisual);
-                            }
-                        }
+                        // 挂到宿主容器（主画布 = inkCanvas 的父面板；独立画布 = 其渐隐层）。
+                        // 宿主容器与笔迹同一坐标系，避免坐标换算问题。
+                        visualHost.Add(strokeVisual);
                     }
                     catch (Exception ex)
                     {
@@ -172,20 +243,12 @@ namespace Ink_Canvas.Helpers
 
                 if (_strokeVisuals.TryGetValue(stroke, out var visual))
                 {
+                    var host = GetHost(stroke);
                     _dispatcher.InvokeAsync(() =>
                     {
                         try
                         {
-                            // 从父容器中移除墨迹
-                            var parent = _mainWindow.inkCanvas?.Parent as Panel;
-                            if (parent != null && parent.Children.Contains(visual))
-                            {
-                                parent.Children.Remove(visual);
-                            }
-                            else if (_mainWindow.inkCanvas != null && _mainWindow.inkCanvas.Children.Contains(visual))
-                            {
-                                _mainWindow.inkCanvas.Children.Remove(visual);
-                            }
+                            host?.Remove(visual);
                         }
                         catch (Exception ex)
                         {
@@ -199,6 +262,7 @@ namespace Ink_Canvas.Helpers
                 _strokeStartPoints.Remove(stroke);
                 _strokeEndPoints.Remove(stroke);
                 _strokeAnimationDurations.Remove(stroke);
+                _strokeHosts.Remove(stroke);
             }
             catch (Exception ex)
             {
@@ -224,20 +288,11 @@ namespace Ink_Canvas.Helpers
                 {
                     try
                     {
-                        if (_mainWindow.inkCanvas != null)
+                        // 每条视觉各自可能挂在不同宿主（主画布面板 / 独立画布渐隐层），逐个按记录移除。
+                        foreach (var kvp in _strokeVisuals.ToList())
                         {
-                            var parent = _mainWindow.inkCanvas.Parent as Panel;
-                            foreach (var visual in _strokeVisuals.Values)
-                            {
-                                if (parent != null && parent.Children.Contains(visual))
-                                {
-                                    parent.Children.Remove(visual);
-                                }
-                                else if (_mainWindow.inkCanvas.Children.Contains(visual))
-                                {
-                                    _mainWindow.inkCanvas.Children.Remove(visual);
-                                }
-                            }
+                            var visual = kvp.Value;
+                            GetHost(kvp.Key)?.Remove(visual);
                         }
                     }
                     catch (Exception ex)
@@ -250,6 +305,7 @@ namespace Ink_Canvas.Helpers
                 _strokeStartPoints.Clear();
                 _strokeEndPoints.Clear();
                 _strokeAnimationDurations.Clear();
+                _strokeHosts.Clear();
             }
             catch (Exception ex)
             {
@@ -350,7 +406,10 @@ namespace Ink_Canvas.Helpers
                     Fill = drawingAttribs.IsHighlighter ? new SolidColorBrush(drawingAttribs.Color) : null,
                     Opacity = 0.95,
                     UseLayoutRounding = false,
-                    SnapsToDevicePixels = false
+                    SnapsToDevicePixels = false,
+                    // 渐隐视觉只是「正在消失的副本」，绝不能参与命中测试：
+                    // 主画布上它会盖在 inkCanvas 之上挡住书写，独立画布上同理。
+                    IsHitTestVisible = false
                 };
 
                 if (drawingAttribs.IsHighlighter)
@@ -622,7 +681,10 @@ namespace Ink_Canvas.Helpers
 
                 originalVisual.Visibility = Visibility.Hidden;
 
-                var segmentContainer = new System.Windows.Controls.Canvas();
+                var segmentContainer = new System.Windows.Controls.Canvas
+                {
+                    IsHitTestVisible = false
+                };
                 var originalAlpha = stroke.DrawingAttributes.Color.A;
                 segmentContainer.Opacity = originalAlpha / 255.0 * opacity;
 
@@ -652,15 +714,8 @@ namespace Ink_Canvas.Helpers
                     }
                 }
 
-                var parent = _mainWindow.inkCanvas?.Parent as Panel;
-                if (parent != null)
-                {
-                    parent.Children.Add(segmentContainer);
-                }
-                else if (_mainWindow.inkCanvas != null)
-                {
-                    _mainWindow.inkCanvas.Children.Add(segmentContainer);
-                }
+                var host = GetHost(stroke);
+                host?.Add(segmentContainer);
 
                 StartSegmentedFadeAnimation(segments, stroke, originalVisual, duration, segmentContainer);
             }
@@ -714,7 +769,8 @@ namespace Ink_Canvas.Helpers
                     Fill = isHighlighter ? new SolidColorBrush(opaqueColor) : null,
                     Opacity = 1.0,
                     UseLayoutRounding = false,
-                    SnapsToDevicePixels = false
+                    SnapsToDevicePixels = false,
+                    IsHitTestVisible = false
                 };
 
                 return path;
@@ -846,15 +902,7 @@ namespace Ink_Canvas.Helpers
         {
             try
             {
-                var parent = _mainWindow.inkCanvas?.Parent as Panel;
-                if (parent != null && parent.Children.Contains(container))
-                {
-                    parent.Children.Remove(container);
-                }
-                else if (_mainWindow.inkCanvas != null && _mainWindow.inkCanvas.Children.Contains(container))
-                {
-                    _mainWindow.inkCanvas.Children.Remove(container);
-                }
+                GetHost(originalStroke)?.Remove(container);
 
                 OnAnimationCompleted(originalVisual, originalStroke);
             }
@@ -987,16 +1035,8 @@ namespace Ink_Canvas.Helpers
                     scaleTransform.BeginAnimation(ScaleTransform.ScaleYProperty, null);
                 }
 
-                // 从父容器中移除墨迹
-                var parent = _mainWindow.inkCanvas?.Parent as Panel;
-                if (parent != null && parent.Children.Contains(visual))
-                {
-                    parent.Children.Remove(visual);
-                }
-                else if (_mainWindow.inkCanvas != null && _mainWindow.inkCanvas.Children.Contains(visual))
-                {
-                    _mainWindow.inkCanvas.Children.Remove(visual);
-                }
+                // 从宿主容器中移除墨迹
+                GetHost(stroke)?.Remove(visual);
 
                 // 清除 RenderTransform 引用
                 visual.RenderTransform = null;

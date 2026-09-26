@@ -52,7 +52,7 @@
     <value>启用 UI 联动</value>
   </data>
   <data name="MasterToggleHint" xml:space="preserve">
-    <value>开启后在批注模式书写时，自动定位下方应用的文档视口并创建联动画布（当前支持 Word、SumatraPDF）</value>
+    <value>开启后实时识别当前焦点窗口：找到文档视口即创建联动画布，墨迹随文档滚动与缩放同步（当前支持 Word、SumatraPDF）</value>
   </data>
   <data name="Word" xml:space="preserve">
     <value>Microsoft Word</value>
@@ -65,6 +65,24 @@
   </data>
   <data name="SumatraPdfHint" xml:space="preserve">
     <value>在 SumatraPDF 中书写时，跟踪文档渲染区域并联动批注墨迹（支持滚动跟随与自动长截屏）</value>
+  </data>
+  <data name="DebugToggle" xml:space="preserve">
+    <value>调试面板</value>
+  </data>
+  <data name="DebugToggleHint" xml:space="preserve">
+    <value>在画布层显示 UI 联动调试面板：勾选「鼠标抓取元素」后单击目标元素即可采集其 UIA 信息（无需书写采样）</value>
+  </data>
+  <data name="DebugGrabToggle" xml:space="preserve">
+    <value>鼠标抓取元素</value>
+  </data>
+  <data name="DebugGrabHint" xml:space="preserve">
+    <value>抓取中：单击目标元素采集 UIA（点击不会传给目标应用，自动排除本应用窗口）；右键或取消勾选退出</value>
+  </data>
+  <data name="DebugGrabStatus" xml:space="preserve">
+    <value>[鼠标抓取] 已开启 —— 单击目标元素采样，右键退出</value>
+  </data>
+  <data name="DebugNoCapture" xml:space="preserve">
+    <value>（尚未捕捉组件：勾选「鼠标抓取元素」后单击目标元素采样）</value>
   </data>
   <data name="AutomationGroupHeader" xml:space="preserve">
     <value>自动功能</value>

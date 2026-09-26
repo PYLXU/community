@@ -200,86 +200,10 @@ namespace Ink_Canvas
                 // 「屏蔽压感」已在收笔主路径将点集归一成 0.5；此处若再跑 InkStyle 0/1 会重写 PressureFactor，造成假压感。
                 if (!Settings.Canvas.DisablePressure && !wasStraightened)
                 {
-                    switch (Settings.Canvas.InkStyle)
-                    {
-                        case 1:
-                            if (penType == 0)
-                                try
-                                {
-                                    var stylusPoints = new StylusPointCollection();
-                                    var n = e.Stroke.StylusPoints.Count - 1;
-
-                                    for (var i = 0; i <= n; i++)
-                                    {
-                                        var speed = GetPointSpeed(e.Stroke.StylusPoints[Math.Max(i - 1, 0)].ToPoint(),
-                                            e.Stroke.StylusPoints[i].ToPoint(),
-                                            e.Stroke.StylusPoints[Math.Min(i + 1, n)].ToPoint());
-                                        var point = new StylusPoint
-                                        {
-                                            PressureFactor = RateBasedPressureFactorFromPointSpeed(speed),
-                                            X = e.Stroke.StylusPoints[i].X,
-                                            Y = e.Stroke.StylusPoints[i].Y
-                                        };
-                                        stylusPoints.Add(point);
-                                    }
-
-                                    e.Stroke.StylusPoints = stylusPoints;
-                                }
-                                catch (Exception ex) { System.Diagnostics.Debug.WriteLine(ex); }
-
-                            break;
-                        case 0:
-                            if (penType == 0)
-                                try
-                                {
-                                    var stylusPoints = new StylusPointCollection();
-                                    var n = e.Stroke.StylusPoints.Count - 1;
-                                    var pressure = 0.1;
-                                    var x = 10;
-                                    if (n == 1) return e.Stroke;
-                                    if (n >= x)
-                                    {
-                                        for (var i = 0; i < n - x; i++)
-                                        {
-                                            var point = new StylusPoint();
-
-                                            point.PressureFactor = (float)0.5;
-                                            point.X = e.Stroke.StylusPoints[i].X;
-                                            point.Y = e.Stroke.StylusPoints[i].Y;
-                                            stylusPoints.Add(point);
-                                        }
-
-                                        for (var i = n - x; i <= n; i++)
-                                        {
-                                            var point = new StylusPoint();
-
-                                            point.PressureFactor = (float)((0.5 - pressure) * (n - i) / x + pressure);
-                                            point.X = e.Stroke.StylusPoints[i].X;
-                                            point.Y = e.Stroke.StylusPoints[i].Y;
-                                            stylusPoints.Add(point);
-                                        }
-                                    }
-                                    else
-                                    {
-                                        for (var i = 0; i <= n; i++)
-                                        {
-                                            var point = new StylusPoint();
-
-                                            point.PressureFactor = (float)(0.4 * (n - i) / n + pressure);
-                                            point.X = e.Stroke.StylusPoints[i].X;
-                                            point.Y = e.Stroke.StylusPoints[i].Y;
-                                            stylusPoints.Add(point);
-                                        }
-                                    }
-
-                                    e.Stroke.StylusPoints = stylusPoints;
-                                }
-                                catch (Exception ex) { System.Diagnostics.Debug.WriteLine(ex); }
-
-                            break;
-                        case 3:
-                            break;
-                    }
+                    // switch 主体已抽到 TryApplyInkStyleTouchPressure，供收笔主路径与独立画布共用；
+                    // 这里保留原有的「压感均匀」前置判定与 DisablePressure/拉直门控。
+                    if (TryApplyInkStyleTouchPressure(e.Stroke) == InkStylePressureOutcome.AbortTail)
+                        return e.Stroke;
                 }
             }
             catch (Exception ex) { System.Diagnostics.Debug.WriteLine(ex); }
@@ -363,6 +287,158 @@ namespace Ink_Canvas
         {
             if (e?.Stroke != null)
                 ProcessCommittedStroke(e.Stroke);
+        }
+
+        /// <summary>
+        /// 触摸压感模拟的处理结果。
+        /// </summary>
+        private enum TouchPressureSimulationOutcome
+        {
+            /// <summary>未应用（非触摸输入或功能关闭）。</summary>
+            NotApplied = 0,
+
+            /// <summary>已应用模拟压感。</summary>
+            Applied = 1,
+
+            /// <summary>
+            /// 应终止整条收笔后处理管线。保持主画布既有语义（原实现在该分支直接 <c>return</c>）。
+            /// </summary>
+            AbortPipeline = 2
+        }
+
+        /// <summary>
+        /// 触摸压感模拟：无压感设备（触摸/鼠标）落笔时按 <see cref="Settings.Canvas.InkStyle"/> 合成压感曲线。
+        /// <para>
+        /// 由主画布收笔管线与 UI 联动独立画布适配层共用，保证两块画布的线条粗细一致。
+        /// 调用方需先处理「屏蔽压感/暂停拉直」的归一分支（那是另一套语义）。
+        /// </para>
+        /// </summary>
+        private TouchPressureSimulationOutcome TryApplyTouchPressureSimulation(Stroke stroke)
+        {
+            if (stroke?.StylusPoints == null || stroke.StylusPoints.Count == 0)
+                return TouchPressureSimulationOutcome.NotApplied;
+            if (!Settings.Canvas.EnablePressureTouchMode)
+                return TouchPressureSimulationOutcome.NotApplied;
+
+            bool isTouchInput = true;
+            foreach (StylusPoint point in stroke.StylusPoints)
+            {
+                if ((point.PressureFactor > 0.501 || point.PressureFactor < 0.5) && point.PressureFactor != 0)
+                {
+                    isTouchInput = false;
+                    break;
+                }
+            }
+
+            if (!isTouchInput) return TouchPressureSimulationOutcome.NotApplied;
+
+            switch (Settings.Canvas.InkStyle)
+            {
+                case 1:
+                    if (penType == 0)
+                        try
+                        {
+                            var stylusPoints = new StylusPointCollection();
+                            var n = stroke.StylusPoints.Count - 1;
+
+                            for (var i = 0; i <= n; i++)
+                            {
+                                var speed = GetPointSpeed(stroke.StylusPoints[Math.Max(i - 1, 0)].ToPoint(),
+                                    stroke.StylusPoints[i].ToPoint(),
+                                    stroke.StylusPoints[Math.Min(i + 1, n)].ToPoint());
+                                var point = new StylusPoint
+                                {
+                                    PressureFactor = RateBasedPressureFactorFromPointSpeed(speed),
+                                    X = stroke.StylusPoints[i].X,
+                                    Y = stroke.StylusPoints[i].Y
+                                };
+                                stylusPoints.Add(point);
+                            }
+
+                            stroke.StylusPoints = stylusPoints;
+                            return TouchPressureSimulationOutcome.Applied;
+                        }
+                        catch (Exception ex)
+                        {
+                            System.Diagnostics.Debug.WriteLine(ex);
+                        }
+
+                    break;
+                case 0:
+                    if (penType == 0)
+                        try
+                        {
+                            var stylusPoints = new StylusPointCollection();
+                            var n = stroke.StylusPoints.Count - 1;
+                            var pressure = 0.1;
+                            var x = 10;
+                            if (n == 1) return TouchPressureSimulationOutcome.AbortPipeline;
+                            if (n >= x)
+                            {
+                                for (var i = 0; i < n - x; i++)
+                                {
+                                    var point = new StylusPoint();
+
+                                    point.PressureFactor = (float)0.5;
+                                    point.X = stroke.StylusPoints[i].X;
+                                    point.Y = stroke.StylusPoints[i].Y;
+                                    stylusPoints.Add(point);
+                                }
+
+                                for (var i = n - x; i <= n; i++)
+                                {
+                                    var point = new StylusPoint();
+
+                                    point.PressureFactor = (float)((0.5 - pressure) * (n - i) / x + pressure);
+                                    point.X = stroke.StylusPoints[i].X;
+                                    point.Y = stroke.StylusPoints[i].Y;
+                                    stylusPoints.Add(point);
+                                }
+                            }
+                            else
+                            {
+                                for (var i = 0; i <= n; i++)
+                                {
+                                    var point = new StylusPoint();
+
+                                    point.PressureFactor = (float)(0.4 * (n - i) / n + pressure);
+                                    point.X = stroke.StylusPoints[i].X;
+                                    point.Y = stroke.StylusPoints[i].Y;
+                                    stylusPoints.Add(point);
+                                }
+                            }
+
+                            stroke.StylusPoints = stylusPoints;
+                            return TouchPressureSimulationOutcome.Applied;
+                        }
+                        catch (Exception ex)
+                        {
+                            System.Diagnostics.Debug.WriteLine(ex);
+                        }
+
+                    break;
+            }
+
+            return TouchPressureSimulationOutcome.NotApplied;
+        }
+
+        /// <summary>
+        /// 是否应当应用「实时笔锋」（速度驱动的笔尖混合）。条件由主画布管线抽出，
+        /// 独立画布适配层复用同一判定，避免两块画布的笔锋开关语义分叉。
+        /// </summary>
+        private bool ShouldApplyVelocityBrushTip(
+            Stroke stroke, bool isPauseStraightened, bool touchPressureSimulationApplied)
+        {
+            return Settings.Canvas.InkStyle == 3
+                   && !isPauseStraightened
+                   && Settings.Canvas.VelocityBrushTipMix > 0
+                   && !Settings.Canvas.DisablePressure
+                   && !touchPressureSimulationApplied
+                   && penType != 1
+                   && stroke?.DrawingAttributes != null
+                   && !stroke.DrawingAttributes.IsHighlighter
+                   && !stroke.ContainsPropertyData(RealtimeVelocityBrushTipAppliedGuid)
+                   && stroke.StylusPoints.Count >= 3;
         }
 
         /// <summary>
@@ -492,115 +568,21 @@ namespace Ink_Canvas
                     }
                     e.Stroke.StylusPoints = uniformPoints;
                 }
-                else if (Settings.Canvas.EnablePressureTouchMode)
+                else
                 {
-                    bool isTouchInput = true;
-                    foreach (StylusPoint point in e.Stroke.StylusPoints)
-                    {
-                        if ((point.PressureFactor > 0.501 || point.PressureFactor < 0.5) && point.PressureFactor != 0)
-                        {
-                            isTouchInput = false;
-                            break;
-                        }
-                    }
-
-                    if (isTouchInput)
-                    {
-                        switch (Settings.Canvas.InkStyle)
-                        {
-                            case 1:
-                                if (penType == 0)
-                                    try
-                                    {
-                                        var stylusPoints = new StylusPointCollection();
-                                        var n = e.Stroke.StylusPoints.Count - 1;
-
-                                        for (var i = 0; i <= n; i++)
-                                        {
-                                            var speed = GetPointSpeed(e.Stroke.StylusPoints[Math.Max(i - 1, 0)].ToPoint(),
-                                                e.Stroke.StylusPoints[i].ToPoint(),
-                                                e.Stroke.StylusPoints[Math.Min(i + 1, n)].ToPoint());
-                                            var point = new StylusPoint
-                                            {
-                                                PressureFactor = RateBasedPressureFactorFromPointSpeed(speed),
-                                                X = e.Stroke.StylusPoints[i].X,
-                                                Y = e.Stroke.StylusPoints[i].Y
-                                            };
-                                            stylusPoints.Add(point);
-                                        }
-
-                                        touchPressureSimulationApplied = true;
-                                        e.Stroke.StylusPoints = stylusPoints;
-                                    }
-                                    catch (Exception ex) { System.Diagnostics.Debug.WriteLine(ex); }
-                                break;
-                            case 0:
-                                if (penType == 0)
-                                    try
-                                    {
-                                        var stylusPoints = new StylusPointCollection();
-                                        var n = e.Stroke.StylusPoints.Count - 1;
-                                        var pressure = 0.1;
-                                        var x = 10;
-                                        if (n == 1) return;
-                                        if (n >= x)
-                                        {
-                                            for (var i = 0; i < n - x; i++)
-                                            {
-                                                var point = new StylusPoint();
-
-                                                point.PressureFactor = (float)0.5;
-                                                point.X = e.Stroke.StylusPoints[i].X;
-                                                point.Y = e.Stroke.StylusPoints[i].Y;
-                                                stylusPoints.Add(point);
-                                            }
-
-                                            for (var i = n - x; i <= n; i++)
-                                            {
-                                                var point = new StylusPoint();
-
-                                                point.PressureFactor = (float)((0.5 - pressure) * (n - i) / x + pressure);
-                                                point.X = e.Stroke.StylusPoints[i].X;
-                                                point.Y = e.Stroke.StylusPoints[i].Y;
-                                                stylusPoints.Add(point);
-                                            }
-                                        }
-                                        else
-                                        {
-                                            for (var i = 0; i <= n; i++)
-                                            {
-                                                var point = new StylusPoint();
-
-                                                point.PressureFactor = (float)(0.4 * (n - i) / n + pressure);
-                                                point.X = e.Stroke.StylusPoints[i].X;
-                                                point.Y = e.Stroke.StylusPoints[i].Y;
-                                                stylusPoints.Add(point);
-                                            }
-                                        }
-
-                                        touchPressureSimulationApplied = true;
-                                        e.Stroke.StylusPoints = stylusPoints;
-                                    }
-                                    catch (Exception ex) { System.Diagnostics.Debug.WriteLine(ex); }
-                                break;
-                        }
-                    }
+                    // 触摸压感模拟：与 UI 联动独立画布共用同一实现（TryApplyTouchPressureSimulation），
+                    // 保证两块画布在无压感设备上的线条粗细完全一致。
+                    var pressureOutcome = TryApplyTouchPressureSimulation(e.Stroke);
+                    if (pressureOutcome == TouchPressureSimulationOutcome.AbortPipeline)
+                        return;
+                    touchPressureSimulationApplied = pressureOutcome == TouchPressureSimulationOutcome.Applied;
                 }
 
                 // 实时笔锋：勿依赖 DrawingAttributes.IgnorePressure。无压感触摸/鼠标等设备上，运行时仍可能为 true，
                 // 会导致不进入逻辑或进入后渲染仍忽略 PressureFactor；具体在 ApplyVelocityBrushTipFromSpeed 内关闭。
                 // 「屏蔽压感」时必须跳过：否则会重写 PressureFactor 并强制 IgnorePressure=false，与归一压感冲突。
                 // VelocityBrushTipMix <= 0 时 ApplyVelocityBrushTipFromSpeed 为空操作，无需调用。
-                if (Settings.Canvas.InkStyle == 3
-                    && !isPauseStraightened
-                    && Settings.Canvas.VelocityBrushTipMix > 0
-                    && !Settings.Canvas.DisablePressure
-                    && !touchPressureSimulationApplied
-                    && penType != 1
-                    && e.Stroke?.DrawingAttributes != null
-                    && !e.Stroke.DrawingAttributes.IsHighlighter
-                    && !e.Stroke.ContainsPropertyData(RealtimeVelocityBrushTipAppliedGuid)
-                    && e.Stroke.StylusPoints.Count >= 3)
+                if (ShouldApplyVelocityBrushTip(e.Stroke, isPauseStraightened, touchPressureSimulationApplied))
                 {
                     ApplyVelocityBrushTipFromSpeed(e.Stroke);
                 }
@@ -679,355 +661,11 @@ namespace Ink_Canvas
                         Settings.InkToShape.IsInkToShapeEnabled,
                         ShapeRecognitionRouter.FromSettingsInt(Settings.InkToShape.ShapeRecognitionEngine)))
                 {
-                    async Task InkToShapeProcessCoreAsync()
-                    {
-                        await InkToShapeSerial.WaitAsync().ConfigureAwait(true);
-                        try
-                        {
-                            newStrokes.Add(e.Stroke);
-                            if (newStrokes.Count > 4) newStrokes.RemoveAt(0);
-                            for (var i = 0; i < newStrokes.Count; i++)
-                                if (!inkCanvas.Strokes.Contains(newStrokes[i]))
-                                    newStrokes.RemoveAt(i--);
-
-                            for (var i = 0; i < circles.Count; i++)
-                                if (!inkCanvas.Strokes.Contains(circles[i].Stroke))
-                                    circles.RemoveAt(i);
-
-                            // 处理矩形参考线系统
-                            ProcessRectangleGuideLines(e.Stroke);
-
-                            var shapeMode = ShapeRecognitionRouter.FromSettingsInt(Settings.InkToShape.ShapeRecognitionEngine);
-                            InkShapeRecognitionResult result = InkShapeRecognitionResult.Empty;
-
-                            if (ShapeRecognitionRouter.ResolveUseWinRt(shapeMode) && Helpers.WinRtInkShapeRecognizer.IsApiAvailable)
-                            {
-                                result = await ModernInkAnalyzer.AnalyzeAsync(newStrokes);
-                            }
-                            else
-                            {
-                                var strokeReco = new StrokeCollection();
-                                result = await InkRecognizeHelper.RecognizeShapeUnifiedAsync(newStrokes, shapeMode);
-                                for (var i = newStrokes.Count - 1; i >= 0; i--)
-                                {
-                                    strokeReco.Add(newStrokes[i]);
-                                    var newResult = await InkRecognizeHelper.RecognizeShapeUnifiedAsync(strokeReco, shapeMode);
-                                    if (newResult.IsSuccess &&
-                                        (newResult.ShapeName == "Circle" || newResult.ShapeName == "Ellipse"))
-                                    {
-                                        result = newResult;
-                                        break;
-                                    }
-                                }
-                            }
-
-                            if (!result.IsSuccess)
-                                return;
-
-                            // 拟合度门禁：吻合度过低保留原笔画，不强行纠正（涂鸦误判为形状的主修复点）
-                            if (!PassesShapeFitGate(result))
-                                return;
-
-                            if (result.ShapeName == "Circle" &&
-                                Settings.InkToShape.IsInkToShapeRounded)
-                            {
-                                if (result.ShapeWidth > 75 * GetResolutionScale())
-                                {
-                                    foreach (var circle in circles)
-                                        //判断是否画同心圆
-                                        if (Math.Abs(result.Centroid.X - circle.Centroid.X) / result.ShapeWidth < 0.12 &&
-                                            Math.Abs(result.Centroid.Y - circle.Centroid.Y) / result.ShapeWidth < 0.12)
-                                        {
-                                            result.Centroid = circle.Centroid;
-                                            break;
-                                        }
-                                        else
-                                        {
-                                            var d = (result.Centroid.X - circle.Centroid.X) *
-                                                    (result.Centroid.X - circle.Centroid.X) +
-                                                    (result.Centroid.Y - circle.Centroid.Y) *
-                                                    (result.Centroid.Y - circle.Centroid.Y);
-                                            d = Math.Sqrt(d);
-                                            //判断是否画外切圆
-                                            var x = result.ShapeWidth / 2.0 + circle.R - d;
-                                            if (Math.Abs(x) / result.ShapeWidth < 0.1)
-                                            {
-                                                var sinTheta = (result.Centroid.Y - circle.Centroid.Y) / d;
-                                                var cosTheta = (result.Centroid.X - circle.Centroid.X) / d;
-                                                var newX = result.Centroid.X + x * cosTheta;
-                                                var newY = result.Centroid.Y + x * sinTheta;
-                                                result.Centroid = new Point(newX, newY);
-                                            }
-
-                                            //判断是否画外切圆
-                                            x = Math.Abs(circle.R - result.ShapeWidth / 2.0) - d;
-                                            if (Math.Abs(x) / result.ShapeWidth < 0.1)
-                                            {
-                                                var sinTheta = (result.Centroid.Y - circle.Centroid.Y) / d;
-                                                var cosTheta = (result.Centroid.X - circle.Centroid.X) / d;
-                                                var newX = result.Centroid.X + x * cosTheta;
-                                                var newY = result.Centroid.Y + x * sinTheta;
-                                                result.Centroid = new Point(newX, newY);
-                                            }
-                                        }
-
-                                    var iniP = new Point(result.Centroid.X - result.ShapeWidth / 2,
-                                        result.Centroid.Y - result.ShapeHeight / 2);
-                                    var endP = new Point(result.Centroid.X + result.ShapeWidth / 2,
-                                        result.Centroid.Y + result.ShapeHeight / 2);
-                                    var pointList = GenerateEllipseGeometry(iniP, endP);
-                                    var point = new StylusPointCollection(pointList);
-                                    var stroke = new Stroke(point)
-                                    {
-                                        DrawingAttributes = inkCanvas.DefaultDrawingAttributes.Clone()
-                                    };
-                                    stroke.AddPropertyData(Helpers.ModernInkAnalyzer.ShapeStrokePropertyGuid, true);
-                                    circles.Add(new Circle(result.Centroid, result.ShapeWidth / 2.0, stroke));
-                                    ReplaceStrokesSafely(result.StrokesToRemove, stroke, e.Stroke);
-                                    newStrokes = new StrokeCollection();
-                                }
-                            }
-                            else if (result.ShapeName.Contains("Ellipse") &&
-                                     Settings.InkToShape.IsInkToShapeRounded)
-                            {
-                                var p = result.HotPoints;
-                                var a = GetDistance(p[0], p[2]) / 2; //长半轴
-                                var b = GetDistance(p[1], p[3]) / 2; //短半轴
-                                if (a < b)
-                                {
-                                    var t = a;
-                                    a = b;
-                                    b = t;
-                                }
-
-                                result.Centroid = new Point((p[0].X + p[2].X) / 2, (p[0].Y + p[2].Y) / 2);
-                                var needRotation = true;
-
-                                if (result.ShapeWidth > 75 * GetResolutionScale() || (result.ShapeHeight > 75 * GetResolutionScale() && p.Count == 4))
-                                {
-                                    var iniP = new Point(result.Centroid.X - result.ShapeWidth / 2,
-                                        result.Centroid.Y - result.ShapeHeight / 2);
-                                    var endP = new Point(result.Centroid.X + result.ShapeWidth / 2,
-                                        result.Centroid.Y + result.ShapeHeight / 2);
-
-                                    // WinRT 返回的热点顺序/方向不稳定时，用点集反推 IACore 风格椭圆参数（中心/长短轴/方向/四个端点）
-                                    var hasEllipseParams = TryEstimateEllipseParamsFromStrokes(
-                                        result.StrokesToRemove,
-                                        out var ellipseCentroid,
-                                        out var ellipseA,
-                                        out var ellipseB,
-                                        out var ellipseThetaRad,
-                                        out var ellipseMajor0,
-                                        out var ellipseMajor1,
-                                        out var ellipseMinor0,
-                                        out var ellipseMinor1);
-
-                                    foreach (var circle in circles)
-                                        //判断是否画同心椭圆
-                                        if (Math.Abs(result.Centroid.X - circle.Centroid.X) / a < 0.2 &&
-                                            Math.Abs(result.Centroid.Y - circle.Centroid.Y) / a < 0.2)
-                                        {
-                                            result.Centroid = circle.Centroid;
-                                            iniP = new Point(result.Centroid.X - result.ShapeWidth / 2,
-                                                result.Centroid.Y - result.ShapeHeight / 2);
-                                            endP = new Point(result.Centroid.X + result.ShapeWidth / 2,
-                                                result.Centroid.Y + result.ShapeHeight / 2);
-
-                                            //再判断是否与圆相切
-                                            if (Math.Abs(a - circle.R) / a < 0.2)
-                                            {
-                                                if (result.ShapeWidth >= result.ShapeHeight)
-                                                {
-                                                    iniP.X = result.Centroid.X - circle.R;
-                                                    endP.X = result.Centroid.X + circle.R;
-                                                    iniP.Y = result.Centroid.Y - b;
-                                                    endP.Y = result.Centroid.Y + b;
-                                                }
-                                                else
-                                                {
-                                                    iniP.Y = result.Centroid.Y - circle.R;
-                                                    endP.Y = result.Centroid.Y + circle.R;
-                                                    iniP.X = result.Centroid.X - a;
-                                                    endP.X = result.Centroid.X + a;
-                                                }
-                                            }
-
-                                            break;
-                                        }
-                                        else if (Math.Abs(result.Centroid.X - circle.Centroid.X) / a < 0.2)
-                                        {
-                                            var sinTheta = Math.Abs(circle.Centroid.Y - result.Centroid.Y) /
-                                                           circle.R;
-                                            var cosTheta = Math.Sqrt(1 - sinTheta * sinTheta);
-                                            var newA = circle.R * cosTheta;
-                                            if (circle.R * sinTheta / circle.R < 0.9 && a / b > 2 &&
-                                                Math.Abs(newA - a) / newA < 0.3)
-                                            {
-                                                iniP.X = circle.Centroid.X - newA;
-                                                endP.X = circle.Centroid.X + newA;
-                                                iniP.Y = result.Centroid.Y - newA / 5;
-                                                endP.Y = result.Centroid.Y + newA / 5;
-
-                                                var topB = endP.Y - iniP.Y;
-
-                                                newStrokes = new StrokeCollection();
-
-                                                var _pointList = GenerateEllipseGeometry(iniP, endP, false);
-                                                var _point = new StylusPointCollection(_pointList);
-                                                var _stroke = new Stroke(_point)
-                                                {
-                                                    DrawingAttributes = inkCanvas.DefaultDrawingAttributes.Clone()
-                                                };
-                                                _stroke.AddPropertyData(Helpers.ModernInkAnalyzer.ShapeStrokePropertyGuid, true);
-                                                var _dashedLineStroke =
-                                                    GenerateDashedLineEllipseStrokeCollection(iniP, endP, true, false);
-                                                var strokes = new StrokeCollection {
-                                                    _stroke,
-                                                    _dashedLineStroke
-                                                };
-                                                ReplaceStrokesSafely(result.StrokesToRemove, strokes, e.Stroke);
-                                                return;
-                                            }
-                                        }
-                                        else if (Math.Abs(result.Centroid.Y - circle.Centroid.Y) / a < 0.2)
-                                        {
-                                            var cosTheta = Math.Abs(circle.Centroid.X - result.Centroid.X) /
-                                                           circle.R;
-                                            var sinTheta = Math.Sqrt(1 - cosTheta * cosTheta);
-                                            var newA = circle.R * sinTheta;
-                                            if (circle.R * sinTheta / circle.R < 0.9 && a / b > 2 &&
-                                                Math.Abs(newA - a) / newA < 0.3)
-                                            {
-                                                iniP.X = result.Centroid.X - newA / 5;
-                                                endP.X = result.Centroid.X + newA / 5;
-                                                iniP.Y = circle.Centroid.Y - newA;
-                                                endP.Y = circle.Centroid.Y + newA;
-                                                needRotation = false;
-                                            }
-                                        }
-
-                                    // 用反推参数替换中心与长短轴（比 WinRT 的包围盒更接近 IACore，且不会竖横翻转）
-                                    if (hasEllipseParams)
-                                    {
-                                        result.Centroid = ellipseCentroid;
-                                        a = ellipseA;
-                                        b = ellipseB;
-                                        iniP = new Point(result.Centroid.X - a, result.Centroid.Y - b);
-                                        endP = new Point(result.Centroid.X + a, result.Centroid.Y + b);
-                                        // 用端点重写热点，保证后续回退分支也一致
-                                        p = new PointCollection { ellipseMajor0, ellipseMinor0, ellipseMajor1, ellipseMinor1 };
-                                    }
-
-                                    var pointList = GenerateEllipseGeometry(iniP, endP);
-                                    var point = new StylusPointCollection(pointList);
-                                    var stroke = new Stroke(point)
-                                    {
-                                        DrawingAttributes = inkCanvas.DefaultDrawingAttributes.Clone()
-                                    };
-                                    stroke.AddPropertyData(Helpers.ModernInkAnalyzer.ShapeStrokePropertyGuid, true);
-
-                                    if (needRotation)
-                                    {
-                                        var m = new Matrix();
-                                        // 优先使用反推参数角度；否则用端点向量角度（使用 Atan2 避免斜率无穷）
-                                        var theta = hasEllipseParams ? ellipseThetaRad : Math.Atan2(p[2].Y - p[0].Y, p[2].X - p[0].X);
-                                        m.RotateAt(theta * 180.0 / Math.PI, result.Centroid.X, result.Centroid.Y);
-                                        stroke.Transform(m, false);
-                                    }
-
-                                    ReplaceStrokesSafely(result.StrokesToRemove, stroke, e.Stroke);
-                                    GridInkCanvasSelectionCover.Visibility = Visibility.Collapsed;
-                                    newStrokes = new StrokeCollection();
-                                }
-                            }
-                            else if (result.ShapeName.Contains("Triangle") &&
-                                     Settings.InkToShape.IsInkToShapeTriangle)
-                            {
-                                var p = result.HotPoints;
-                                if ((Math.Max(Math.Max(p[0].X, p[1].X), p[2].X) -
-                                     Math.Min(Math.Min(p[0].X, p[1].X), p[2].X) >= 100 * GetResolutionScale() ||
-                                     Math.Max(Math.Max(p[0].Y, p[1].Y), p[2].Y) -
-                                     Math.Min(Math.Min(p[0].Y, p[1].Y), p[2].Y) >= 100 * GetResolutionScale()) &&
-                                    result.HotPoints.Count == 3)
-                                {
-                                    //纠正垂直与水平关系
-                                    var newPoints = FixPointsDirection(p[0], p[1]);
-                                    p[0] = newPoints[0];
-                                    p[1] = newPoints[1];
-                                    newPoints = FixPointsDirection(p[0], p[2]);
-                                    p[0] = newPoints[0];
-                                    p[2] = newPoints[1];
-                                    newPoints = FixPointsDirection(p[1], p[2]);
-                                    p[1] = newPoints[0];
-                                    p[2] = newPoints[1];
-
-                                    var pointList = p.ToList();
-                                    //pointList.Add(p[0]);
-                                    var point = new StylusPointCollection(pointList);
-                                    var stroke = new Stroke(GenerateFakePressureTriangle(point))
-                                    {
-                                        DrawingAttributes = inkCanvas.DefaultDrawingAttributes.Clone()
-                                    };
-                                    stroke.AddPropertyData(Helpers.ModernInkAnalyzer.ShapeStrokePropertyGuid, true);
-                                    ReplaceStrokesSafely(result.StrokesToRemove, stroke, e.Stroke);
-                                    GridInkCanvasSelectionCover.Visibility = Visibility.Collapsed;
-                                    newStrokes = new StrokeCollection();
-                                }
-                            }
-                            else if ((result.ShapeName.Contains("Rectangle") ||
-                                      result.ShapeName.Contains("Diamond") ||
-                                      result.ShapeName.Contains("Parallelogram") ||
-                                      result.ShapeName.Contains("Square") ||
-                                      result.ShapeName.Contains("Trapezoid") ||
-                                      result.ShapeName.Contains("Quadrilateral")) &&
-                                     Settings.InkToShape.IsInkToShapeRectangle)
-                            {
-                                var p = result.HotPoints;
-                                if ((Math.Max(Math.Max(Math.Max(p[0].X, p[1].X), p[2].X), p[3].X) -
-                                     Math.Min(Math.Min(Math.Min(p[0].X, p[1].X), p[2].X), p[3].X) >= 100 * GetResolutionScale() ||
-                                     Math.Max(Math.Max(Math.Max(p[0].Y, p[1].Y), p[2].Y), p[3].Y) -
-                                     Math.Min(Math.Min(Math.Min(p[0].Y, p[1].Y), p[2].Y), p[3].Y) >= 100 * GetResolutionScale()) &&
-                                    result.HotPoints.Count == 4)
-                                {
-                                    //纠正垂直与水平关系
-                                    var newPoints = FixPointsDirection(p[0], p[1]);
-                                    p[0] = newPoints[0];
-                                    p[1] = newPoints[1];
-                                    newPoints = FixPointsDirection(p[1], p[2]);
-                                    p[1] = newPoints[0];
-                                    p[2] = newPoints[1];
-                                    newPoints = FixPointsDirection(p[2], p[3]);
-                                    p[2] = newPoints[0];
-                                    p[3] = newPoints[1];
-                                    newPoints = FixPointsDirection(p[3], p[0]);
-                                    p[3] = newPoints[0];
-                                    p[0] = newPoints[1];
-
-                                    var pointList = p.ToList();
-                                    pointList.Add(p[0]);
-                                    var point = new StylusPointCollection(pointList);
-                                    var stroke = new Stroke(GenerateFakePressureRectangle(point))
-                                    {
-                                        DrawingAttributes = inkCanvas.DefaultDrawingAttributes.Clone()
-                                    };
-                                    stroke.AddPropertyData(Helpers.ModernInkAnalyzer.ShapeStrokePropertyGuid, true);
-                                    ReplaceStrokesSafely(result.StrokesToRemove, stroke, e.Stroke);
-                                    GridInkCanvasSelectionCover.Visibility = Visibility.Collapsed;
-                                    newStrokes = new StrokeCollection();
-                                }
-                            }
-                        }
-                        catch (Exception ex) { System.Diagnostics.Debug.WriteLine(ex); }
-                        finally
-                        {
-                            InkToShapeSerial.Release();
-                        }
-                    }
 
                     bool InkToShapeProcess()
                     {
                         // WinRT 与非 WinRT 均延后到 Dispatcher 上异步执行：在 StrokeCollected 内对
-                        // InkToShapeProcessCoreAsync 同步 GetResult() 会长时间阻塞 UI 线程（抬笔卡顿）；
+                        // 形状纠正核心同步 GetResult() 会长时间阻塞 UI 线程（抬笔卡顿）；
                         // WinRT 路径若同步等待还可能与贴回 UI 的延续死锁（见类注释 InkToShapeSerial）。
                         var strokeHw = strokeForHandwritingBeautify;
                         var wsTail = wasStraightened;
@@ -1036,7 +674,7 @@ namespace Ink_Canvas
                         {
                             try
                             {
-                                await InkToShapeProcessCoreAsync();
+                                await RunInkToShapeCorrectionCoreAsync(CreateMainCanvasInkToShapeContext(), e.Stroke);
                                 var strokeAfterTail = RunStrokeCollectedPostShapeRecognitionTail(e, wsTail);
                                 if (wsTail && strokeHw != null && inkCanvas.Strokes.Contains(strokeHw))
                                     PublishPluginCanvasLineCandidate(
@@ -2134,8 +1772,20 @@ namespace Ink_Canvas
         /// 5. 如果发生了吸附，返回吸附后的端点数组，否则返回null
         /// </remarks>
         private Point[] GetSnappedEndpoints(Point start, Point end)
+            => GetSnappedEndpoints(start, end, inkCanvas?.Strokes);
+
+        /// <summary>
+        /// 端点吸附（可指定候选笔迹集合）。
+        /// <para>
+        /// 主画布传 <c>inkCanvas.Strokes</c>；UI 联动独立画布传自己的集合，
+        /// 避免把 Word 批注吸附到白板笔迹上（两块画布坐标系不同）。
+        /// </para>
+        /// </summary>
+        private Point[] GetSnappedEndpoints(Point start, Point end, StrokeCollection snapTargets)
         {
             if (!Settings.Canvas.LineEndpointSnapping)
+                return null;
+            if (snapTargets == null)
                 return null;
 
             bool startSnapped = false;
@@ -2147,7 +1797,7 @@ namespace Ink_Canvas
             double snapThreshold = Settings.Canvas.LineEndpointSnappingThreshold;
 
             // Check all strokes in canvas for potential snap points
-            foreach (Stroke stroke in inkCanvas.Strokes)
+            foreach (Stroke stroke in snapTargets)
             {
                 if (stroke.StylusPoints.Count == 0) continue;
 
@@ -2558,7 +2208,7 @@ namespace Ink_Canvas
         /// 阈值固定为默认严格度（等价 strictness=0.5）：多边形归一化残差 ≤0.20，
         /// 椭圆代数残差 mean|q| ≤0.25 且闭合度 ≤0.25。
         /// </summary>
-        private bool PassesShapeFitGate(InkShapeRecognitionResult result)
+        private bool PassesShapeFitGate(InkShapeRecognitionResult result, Size canvasSize)
         {
             if (result == null || !result.IsSuccess || result.StrokesToRemove == null || result.StrokesToRemove.Count == 0)
                 return true; // 上游已 IsSuccess 判过；到这里说明可放行
@@ -2574,8 +2224,9 @@ namespace Ink_Canvas
                     return false;
 
                 // 形状比画布大得离谱（>8 倍画布尺寸）说明坐标系已被极端缩放，纠正无意义且易 OOM。
-                var canvasW = inkCanvas?.ActualWidth ?? 0;
-                var canvasH = inkCanvas?.ActualHeight ?? 0;
+                // 画布尺寸由调用方注入：主画布传 inkCanvas 尺寸，独立画布传自己的视口尺寸。
+                var canvasW = canvasSize.Width;
+                var canvasH = canvasSize.Height;
                 if (canvasW > 0 && canvasH > 0)
                 {
                     if (result.ShapeWidth > canvasW * 8 || result.ShapeHeight > canvasH * 8)

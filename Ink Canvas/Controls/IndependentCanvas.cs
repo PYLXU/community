@@ -32,7 +32,10 @@ namespace Ink_Canvas.Controls
 
         private readonly Grid _rootGrid;
         private readonly Border _contentHost;
+        private readonly Grid _inkHost;
         private readonly InkCanvas _inkCanvas;
+        private readonly System.Windows.Controls.Canvas _fadeLayer;
+        private readonly TranslateTransform _fadeLayerShift;
         private readonly ScrollBar _verticalScrollBar;
         private readonly ScrollBar _horizontalScrollBar;
         private readonly FrameworkElement _noticeBar;
@@ -84,10 +87,38 @@ namespace Ink_Canvas.Controls
                 ClipToBounds = true
             };
 
+            // 触摸抑制（对齐主画布 InkCanvas_PreviewTouchDown 的策略）：
+            // WPF 会把触摸提升为触笔事件，裸 InkCanvas 因此会把「单指拖动 / 双指手势」
+            // 直接画成笔迹。主画布靠自绘输入管线 + 手势系统规避，独立画布必须在
+            // 提升阶段就抑制：第二指在 MULTI_TOUCH_DELAY_MS 内落下即判定为多指手势，
+            // 期间落在画布上的那一笔不提交（延迟提交 + 撤销）。
+            _inkCanvas.IsManipulationEnabled = false;
+            _inkCanvas.PreviewTouchDown += InkSurface_PreviewTouchDown;
+            _inkCanvas.PreviewTouchUp += InkSurface_PreviewTouchUp;
+            _inkCanvas.LostTouchCapture += InkSurface_LostTouchCapture;
+
             // 无内部填充色：保持透明，避免影响鼠标模式下的穿透视觉。
+            //
+            // 渐隐层：与内层 InkCanvas 同一坐标系（两者都在同一个 Grid 单元格里、同尺寸同原点），
+            // 供宿主共享的 InkFadeManager 挂载激光笔/渐隐笔迹的视觉副本。因为滚动同步是把
+            // 笔迹数据整体 Transform 平移的，渐隐层也必须跟着平移，否则渐隐中的激光笔迹
+            // 会与画布内容错位（见 ApplyShift）。
+            _fadeLayer = new System.Windows.Controls.Canvas
+            {
+                Background = null,
+                IsHitTestVisible = false,
+                ClipToBounds = true
+            };
+            _fadeLayerShift = new TranslateTransform();
+            _fadeLayer.RenderTransform = _fadeLayerShift;
+
+            _inkHost = new Grid();
+            _inkHost.Children.Add(_inkCanvas);
+            _inkHost.Children.Add(_fadeLayer);
+
             _contentHost = new Border
             {
-                Child = _inkCanvas,
+                Child = _inkHost,
                 Background = Brushes.Transparent,
                 BorderBrush = Brushes.Transparent,
                 ClipToBounds = true
@@ -222,6 +253,246 @@ namespace Ink_Canvas.Controls
 
         /// <summary>滚动辅助按钮点击回调（方向 + 滚动增量，DIP；正值向下/向右）。</summary>
         public Action<Orientation, double> OnScrollStepRequested;
+
+        // ---------------- 触摸抑制（对齐主画布的手势判定策略） ----------------
+
+        /// <summary>主画布同款多指判定窗口：第二指在此时间内落下即视为多指手势。</summary>
+        private const double MultiTouchDelayMs = 100;
+
+        /// <summary>当前按下的触摸设备 Id（用于判断是否已进入多指手势）。</summary>
+        private readonly System.Collections.Generic.HashSet<int> _touchDownIds
+            = new System.Collections.Generic.HashSet<int>();
+
+        /// <summary>因多指手势被抑制的触摸设备 Id（抬起时用于回滚其误产生的笔迹）。</summary>
+        private readonly System.Collections.Generic.HashSet<int> _suppressedTouchIds
+            = new System.Collections.Generic.HashSet<int>();
+
+        /// <summary>按下第一根手指时的笔迹快照，用于多指判定成立后回滚这一笔。</summary>
+        private StrokeCollection _touchStrokeSnapshot;
+
+        private bool _touchEditingModeSaved;
+        private bool _multiTouchSuppressed;
+        private bool _multiTouchSuppressTimerActive;
+        private DateTime _lastTouchDownUtc = DateTime.MinValue;
+
+        /// <summary>
+        /// 触摸抑制时临时切换到的编辑模式（由宿主按当前工具注入，与主画布
+        /// <c>lastInkCanvasEditingMode</c> 同义）。默认 Ink：仅在检测到多指手势时启用。
+        /// </summary>
+        public InkCanvasEditingMode TouchUserEditingMode { get; set; } = InkCanvasEditingMode.Ink;
+
+        /// <summary>
+        /// 触摸抑制是否可用：宿主在非笔类工具（鼠标/图形/漫游等）下应置为 false，
+        /// 避免把本就不接收输入的画布状态改坏。
+        /// </summary>
+        public bool TouchSuppressionEnabled { get; set; } = true;
+
+        // ---------------- 手掌擦（与主画布同一套接触面积判定） ----------------
+
+        /// <summary>
+        /// 手掌接触分类器：由宿主注入（见 <see cref="Ink_Canvas.Ink.PalmContactClassifier"/>），
+        /// 内部按与主画布相同的设置与算法判定接触面是否为手掌。为 null 时本画布不做手掌判定。
+        /// </summary>
+        public Ink_Canvas.Ink.PalmContactClassifier PalmContactClassifier { get; set; }
+
+        /// <summary>本画布当前是否因手掌接触而处于擦除态。</summary>
+        public bool IsPalmErasing { get; private set; }
+
+        /// <summary>进入手掌擦前的编辑模式，抬起后据此还原。</summary>
+        private InkCanvasEditingMode _palmErasePreviousEditingMode = InkCanvasEditingMode.Ink;
+
+        /// <summary>
+        /// 接触面是否达到手掌阈值。口径与主画布 <c>InkCanvas_PreviewTouchDown</c> 完全一致：
+        /// 用 <c>GetTouchPoint(null).Bounds</c>（根视觉坐标、已是 DIP）的宽高交给宿主分类器，
+        /// 而分类器内部复用共用的 <see cref="Ink_Canvas.Ink.PalmEraserCalculator"/> 与设置，
+        /// 因此阈值/灵敏度/擦头尺寸的语义与主画布相同，不存在第二套参数。
+        /// </summary>
+        private bool TryEvaluatePalmContact(TouchEventArgs e, out double eraserWidthDip)
+        {
+            eraserWidthDip = 0;
+            var classifier = PalmContactClassifier;
+            if (classifier == null) return false;
+
+            try
+            {
+                var bounds = e.GetTouchPoint(null).Bounds;
+                return classifier(bounds.Width, bounds.Height, out eraserWidthDip)
+                       && eraserWidthDip > 0;
+            }
+            catch (Exception ex)
+            {
+                Ink_Canvas.Helpers.LogHelper.WriteLogToFile(
+                    $"独立画布手掌擦判定失败: {ex.Message}", Ink_Canvas.Helpers.LogHelper.LogType.Warning);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 进入手掌擦：切到 <see cref="InkCanvasEditingMode.EraseByPoint"/> 并把擦头设成判定出的宽度。
+        /// 调用方负责同时把该触摸事件标记为已处理 —— 必须阻断 WPF 的「触摸提升为触笔」，
+        /// 否则手掌会在抬掌后留下一道笔迹（主画布靠自绘输入管线天然规避，本画布没有那条管线）。
+        /// </summary>
+        private void EnterPalmErase(double eraserWidthDip)
+        {
+            IsPalmErasing = true;
+            _palmErasePreviousEditingMode = _inkCanvas.EditingMode;
+            _inkCanvas.EraserShape = new RectangleStylusShape(eraserWidthDip, eraserWidthDip);
+            _inkCanvas.EditingMode = InkCanvasEditingMode.EraseByPoint;
+        }
+
+        /// <summary>退出手掌擦，还原进入前的编辑模式与擦头形状。</summary>
+        private void ExitPalmErase()
+        {
+            if (!IsPalmErasing) return;
+            IsPalmErasing = false;
+
+            // 还原为「进入前」的模式，而不是宿主当前下发的 TouchUserEditingMode：
+            // 期间宿主可能已经切过工具，而触摸抑制那条路径本来就以宿主下发值为准，
+            // 两条路径各自保持自己的语义，互不覆盖。
+            _inkCanvas.EditingMode = _palmErasePreviousEditingMode;
+            _inkCanvas.EraserShape = null;
+        }
+
+        private void InkSurface_PreviewTouchDown(object sender, TouchEventArgs e)
+        {
+            // 手掌擦优先于多指判定：手掌落下时不该被当成手势，也不该产生笔迹。
+            // 判定未通过则原样继续走下面的多指抑制逻辑。
+            if (TryEvaluatePalmContact(e, out var palmEraserWidth))
+            {
+                EnterPalmErase(palmEraserWidth);
+                // 阻止触摸提升为触笔事件 → 手掌不会落墨；随后 WPF 的 InkCanvas 会按
+                // EraseByPoint 处理同一触摸产生的触笔事件，从而真的擦除。
+                e.Handled = true;
+                return;
+            }
+
+            if (!TouchSuppressionEnabled) return;
+
+            var now = DateTime.UtcNow;
+            var elapsedMs = (now - _lastTouchDownUtc).TotalMilliseconds;
+            _lastTouchDownUtc = now;
+
+            _touchDownIds.Add(e.TouchDevice.Id);
+
+            // 单指：记录快照，供「第二指紧随其后」时回滚这一笔。
+            if (_touchDownIds.Count == 1)
+            {
+                _touchStrokeSnapshot = _inkCanvas.Strokes.Clone();
+                return;
+            }
+
+            // 多指手势判定：第二指在窗口内落下 → 这一笔不是书写意图。
+            // 与主画布一致，判定本身也放在延迟回调里，保证「两指同时落下」也走抑制分支。
+            if (_touchDownIds.Count > 1 && elapsedMs < MultiTouchDelayMs)
+            {
+                _suppressedTouchIds.Add(e.TouchDevice.Id);
+                if (!_multiTouchSuppressTimerActive)
+                {
+                    _multiTouchSuppressTimerActive = true;
+                    var remaining = Math.Max(1, MultiTouchDelayMs - elapsedMs);
+                    var timer = new DispatcherTimer(DispatcherPriority.Input, Dispatcher)
+                    {
+                        Interval = TimeSpan.FromMilliseconds(remaining)
+                    };
+                    timer.Tick += (s, _) =>
+                    {
+                        timer.Stop();
+                        _multiTouchSuppressTimerActive = false;
+                        if (_touchDownIds.Count > 1) EnterMultiTouchSuppression();
+                    };
+                    timer.Start();
+                }
+                return;
+            }
+
+            // 第二指落下较晚（超过判定窗口）：按多指手势处理，不再提交新的笔迹。
+            _suppressedTouchIds.Add(e.TouchDevice.Id);
+            EnterMultiTouchSuppression();
+        }
+
+        private void EnterMultiTouchSuppression()
+        {
+            if (_multiTouchSuppressed) return;
+            _multiTouchSuppressed = true;
+
+            if (!_touchEditingModeSaved)
+            {
+                // 只记「是否需要恢复」；恢复值取宿主当前下发的 TouchUserEditingMode，
+                // 避免把画布改回手势开始前的过时模式。
+                _touchEditingModeSaved = true;
+            }
+
+            // 切 None 抑制 WPF 内置墨迹：第二指及之后不再产生新笔迹。
+            // 形状/漫游等工具下宿主本来就让独立画布保持 None，这里只对可书写模式生效
+            // （对齐主画布：橡皮擦模式不抑制，让原生擦除照常工作）。
+            if (_inkCanvas.EditingMode == InkCanvasEditingMode.Ink
+                || _inkCanvas.EditingMode == InkCanvasEditingMode.Select)
+            {
+                _inkCanvas.EditingMode = InkCanvasEditingMode.None;
+            }
+        }
+
+        private void InkSurface_PreviewTouchUp(object sender, TouchEventArgs e)
+            => ReleaseTouch(e.TouchDevice.Id);
+
+        private void InkSurface_LostTouchCapture(object sender, TouchEventArgs e)
+            => ReleaseTouch(e.TouchDevice.Id);
+
+        private void ReleaseTouch(int touchId)
+        {
+            _touchDownIds.Remove(touchId);
+
+            // 还有手指按着：保持抑制状态。
+            if (_touchDownIds.Count > 0) return;
+
+            // 最后一次接触抬起：手掌擦态必须退出，否则画布会永久停在 EraseByPoint。
+            ExitPalmErase();
+
+            bool wasSuppressed = _suppressedTouchIds.Count > 0;
+            _suppressedTouchIds.Clear();
+            _multiTouchSuppressTimerActive = false;
+
+            var snapshot = _touchStrokeSnapshot;
+            _touchStrokeSnapshot = null;
+
+            // 先把编辑模式恢复到宿主当前工具，再做回滚。
+            if (_multiTouchSuppressed)
+            {
+                _multiTouchSuppressed = false;
+                if (_touchEditingModeSaved)
+                {
+                    _touchEditingModeSaved = false;
+                    // 宿主可能在这期间改过工具：以宿主当前下发值为准，避免把模式改回旧值。
+                    _inkCanvas.EditingMode = TouchUserEditingMode;
+                }
+            }
+
+            if (!wasSuppressed || snapshot == null) return;
+
+            // 关键时序：PreviewTouchUp 早于 InkCanvas 提交在途笔画（后者在 TouchUp/StylusUp 阶段
+            // 才落到 Strokes），因此回滚必须延后一拍，否则会「回滚了个寂寞」，多指手势留下的
+            // 误笔迹仍然留在画布上。
+            Dispatcher.BeginInvoke(new Action(() => RollbackTouchArtefacts(snapshot)),
+                DispatcherPriority.Background);
+        }
+
+        /// <summary>移除多指手势期间被误提交的笔迹（仅移除快照之后新增的笔画）。</summary>
+        private void RollbackTouchArtefacts(StrokeCollection snapshot)
+        {
+            if (snapshot == null) return;
+            try
+            {
+                var current = _inkCanvas.Strokes;
+                var added = new StrokeCollection(current.Where(s => !snapshot.Contains(s)));
+                if (added.Count > 0) current.Remove(added);
+            }
+            catch (Exception ex)
+            {
+                Ink_Canvas.Helpers.LogHelper.WriteLogToFile(
+                    $"独立画布多指手势笔迹回滚失败: {ex.Message}",
+                    Ink_Canvas.Helpers.LogHelper.LogType.Warning);
+            }
+        }
 
         private double ScrollStepDip() => Math.Max(120, _viewportH * 0.85);
 
@@ -429,6 +700,15 @@ namespace Ink_Canvas.Controls
 
         /// <summary>内部 InkCanvas（供上层需要读取/清空墨迹时使用）。</summary>
         public InkCanvas InkSurface => _inkCanvas;
+
+        private Helpers.InkFadeVisualHost _fadeVisualHost;
+
+        /// <summary>
+        /// 渐隐视觉宿主：供宿主共享的 <see cref="Helpers.InkFadeManager"/> 把激光笔/渐隐笔迹的
+        /// 视觉副本挂到本画布内部（与笔迹同坐标系），从而复用主画布那一整套渐隐实现。
+        /// </summary>
+        public Helpers.InkFadeVisualHost FadeVisualHost
+            => _fadeVisualHost ??= new Helpers.InkFadeVisualHost(_fadeLayer.Children);
 
         /// <summary>填充（背景）样式。默认透明，不应设置不透明填充以免影响鼠标模式穿透。</summary>
         public Brush Fill
@@ -640,8 +920,15 @@ namespace Ink_Canvas.Controls
             BeginScrollSession();
             _scrollX = 0;
             _scrollY = 0;
-            ApplyToScrollBar(_verticalScrollBar, 0, _viewportW, 1);
-            ApplyToScrollBar(_horizontalScrollBar, 0, _viewportW, 1);
+            // 坐标系回到新文档原点：渐隐层（若有残留的渐隐视觉）也要回到原点，
+            // 否则它会带着旧文档的滚动偏移继续漂浮。
+            _fadeLayerShift.X = 0;
+            _fadeLayerShift.Y = 0;
+            // 竖直条用视口高、水平条用视口宽；extent 取视口本身（范围归零）。
+            // 原实现给竖直条传了 _viewportW、extent 硬编码 1，会让竖直条的 ViewportSize
+            // 与实际视口不符、Maximum 恒为 0，辅助滚动按钮的可用状态随之错乱。
+            ApplyToScrollBar(_verticalScrollBar, 0, _viewportH, _viewportH);
+            ApplyToScrollBar(_horizontalScrollBar, 0, _viewportW, _viewportW);
         }
 
         /// <summary>当前已应用的滚动逻辑偏移（DIP；长截屏等需对齐墨迹位置的场景读取）。</summary>
@@ -730,6 +1017,11 @@ namespace Ink_Canvas.Controls
         private void ApplyShift(Vector shift)
         {
             if (shift.X == 0 && shift.Y == 0) return;
+
+            // 渐隐层（激光笔渐隐视觉）与笔迹同坐标系，必须同步平移，否则渐隐中的笔迹会错位。
+            _fadeLayerShift.X += shift.X;
+            _fadeLayerShift.Y += shift.Y;
+
             if (_inkCanvas.Strokes.Count == 0) return;
 
             var matrix = new Matrix(1, 0, 0, 1, shift.X, shift.Y);
@@ -779,10 +1071,103 @@ namespace Ink_Canvas.Controls
         }
 
         /// <summary>
+        /// 释放本画布持有的订阅。宿主把实例解绑（移出视觉树）时必须调用一次：
+        /// 墨迹撤销历史会把自己挂到每条 <see cref="Stroke.StylusPointsChanged"/> 上，
+        /// 不释放会让历史笔迹继续持有观察者与点集快照。幂等，可重复调用。
+        /// </summary>
+        public void ReleaseSubscriptions()
+        {
+            _history.Dispose();
+        }
+
+        /// <summary>本画布是否还有可撤销的墨迹操作（供宿主快捷键分派）。</summary>
+        public bool InkHistoryCanUndo => _history.CanUndo;
+
+        /// <summary>本画布是否还有可恢复的墨迹操作（供宿主快捷键分派）。</summary>
+        public bool InkHistoryCanRedo => _history.CanRedo;
+
+        /// <summary>撤销本画布最近一次墨迹操作（不影响主画布）。</summary>
+        public void InkHistoryUndo() => _history.Undo();
+
+        /// <summary>恢复本画布最近一次被撤销的墨迹操作（不影响主画布）。</summary>
+        public void InkHistoryRedo() => _history.Redo();
+
+        /// <summary>
+        /// 用 <paramref name="replacements"/> 替换 <paramref name="removed"/>（如收笔后的平滑/美化），
+        /// 走 <see cref="StrokeCollection.Replace(StrokeCollection, StrokeCollection)"/> 的单次事件，
+        /// 因此在本画布撤销栈里只占一步——否则平滑会变成「撤销两次才回到书写前」。
+        /// </summary>
+        public void ReplaceStrokes(StrokeCollection removed, StrokeCollection replacements)
+        {
+            if (_inkCanvas == null) return;
+            if (replacements == null || replacements.Count == 0) return;
+
+            if (removed == null || removed.Count == 0)
+            {
+                _inkCanvas.Strokes.Add(replacements);
+                return;
+            }
+
+            _inkCanvas.Strokes.Replace(removed, replacements);
+        }
+
+        /// <summary>
+        /// 清空本画布的全部墨迹（「清空画布」语义，与主画布 <c>inkCanvas.Strokes.Clear()</c> 一致）。
+        /// <para>
+        /// 注意不要只清「当前视口」：滚动同步是把整个笔迹集合 Transform 平移实现的，
+        /// 视口外的笔迹依然属于本画布，只清视口会让用户滚动目标文档后看到旧批注「复活」。
+        /// 清空动作由 <see cref="IndependentInkHistory"/> 自动记录，可在本画布内撤销恢复。
+        /// </para>
+        /// </summary>
+        public void ClearAllStrokes()
+        {
+            if (_inkCanvas.Strokes.Count == 0) return;
+            _inkCanvas.Strokes.Clear();
+        }
+
+        /// <summary>
+        /// 静默移除笔迹：只改墨迹集合，<b>不写入本画布撤销历史</b>。
+        /// <para>
+        /// 用于「笔迹本就不该成为永久内容」的场景（激光笔/墨迹渐隐：已交给
+        /// <see cref="Helpers.InkFadeManager"/> 做视觉渐隐），与主画布
+        /// <c>ProcessCommittedStroke</c> 里 <c>inkCanvas.Strokes.Remove(e.Stroke)</c> 同义；
+        /// 但额外避免在独立画布撤销栈里留下一条「删除」，否则用户按撤销会把
+        /// 已经渐隐消失的激光笔迹重新贴回画布。
+        /// </para>
+        /// </summary>
+        public void RemoveStrokesSilently(System.Collections.Generic.IEnumerable<Stroke> strokes)
+        {
+            if (strokes == null) return;
+            var toRemove = new StrokeCollection(strokes.Where(s => _inkCanvas.Strokes.Contains(s)));
+            if (toRemove.Count == 0) return;
+
+            using (_history.SuppressRecording())
+                _inkCanvas.Strokes.Remove(toRemove);
+        }
+
+        /// <summary>
+        /// 遗忘某条笔迹的「新增」撤销记录。
+        /// <para>
+        /// 配合 <see cref="RemoveStrokesSilently"/>：WPF 收集笔迹时会先同步写入
+        /// 集合（撤销栈随即记下一条「新增」），静默移除只保证不产生「删除」记录，
+        /// 若不同时抹掉这条「新增」，用户撤销时会执行一次「移除」而看不到任何变化。
+        /// </para>
+        /// </summary>
+        public void ForgetStrokeAddition(Stroke stroke)
+        {
+            if (stroke == null) return;
+            _history.ForgetAdditionOf(stroke);
+        }
+
+        /// <summary>
         /// 清空当前可视区域内的墨迹（可见区域即本画布当前视口），保留视口之外的墨迹。
         /// 因滚动同步通过 stroke.Transform 令墨迹始终处于「当前视口坐标」，故只需与
         /// (0,0,视口宽,视口高) 求交即可。清除动作进入本画布撤销历史，可撤销恢复。
         /// </summary>
+        /// <remarks>
+        /// 「清空画布」按钮已改用 <see cref="ClearAllStrokes"/>；本方法保留给
+        /// 「只擦掉眼前这些」这类需要按视口裁剪的场景。
+        /// </remarks>
         public void ClearVisibleRegionStrokes()
         {
             double w = _inkCanvas.ActualWidth > 0 ? _inkCanvas.ActualWidth : _inkCanvas.Width;
@@ -805,19 +1190,76 @@ namespace Ink_Canvas.Controls
         }
 
         /// <summary>
-        /// 独立画布专用的轻量墨迹撤销/恢复历史：监听 StrokesChanged 记录增/删操作，
-        /// 撤销即反向应用。仅作用于本画布，不影响主画布 TimeMachine。
+        /// 一条可撤销操作。两种形态互斥：
+        /// <list type="bullet">
+        /// <item>集合增删（书写、擦除、清空、形状纠正的替换）—— <see cref="Added"/>/<see cref="Removed"/> 非空；</item>
+        /// <item>几何变更（框选拖动/缩放笔迹）—— <see cref="PointStroke"/> 非空，
+        /// 且 <see cref="BeforePoints"/>/<see cref="AfterPoints"/> 为同一笔迹的前后点集。</item>
+        /// </list>
         /// </summary>
-        private sealed class IndependentInkHistory
+        private sealed class InkOperation
+        {
+            private InkOperation() { }
+
+            public StrokeCollection Added { get; private set; }
+            public StrokeCollection Removed { get; private set; }
+
+            public Stroke PointStroke { get; private set; }
+            public StylusPointCollection BeforePoints { get; private set; }
+            public StylusPointCollection AfterPoints { get; set; }
+
+            public bool IsPointsOperation => PointStroke != null;
+
+            public static InkOperation ForCollection(StrokeCollection added, StrokeCollection removed)
+                => new InkOperation
+                {
+                    Added = added ?? new StrokeCollection(),
+                    Removed = removed ?? new StrokeCollection()
+                };
+
+            public static InkOperation ForPoints(
+                Stroke stroke, StylusPointCollection before, StylusPointCollection after)
+                => new InkOperation
+                {
+                    PointStroke = stroke,
+                    BeforePoints = before,
+                    AfterPoints = after
+                };
+        }
+
+        /// <summary>
+        /// 独立画布专用的轻量墨迹撤销/恢复历史。记录两类操作，都只作用于本画布，
+        /// 不影响主画布 <c>TimeMachine</c>：
+        /// <list type="number">
+        /// <item><b>集合增删</b>：监听 <c>StrokesChanged</c>（书写、擦除、清空、形状/平滑的 Replace）。</item>
+        /// <item><b>几何变更</b>：框选工具的拖动/缩放是直接改 <c>Stroke.StylusPoints</c>，
+        /// <b>不触发</b> <c>StrokesChanged</c>，因此必须额外监听每条笔迹的
+        /// <c>StylusPointsChanged</c>。<c>Stroke.Transform</c>（滚动同步用）同样不触发该事件，
+        /// 所以滚动不会污染历史 —— 这一点是刻意的，不能被「补上 StylusPointsChanged」
+        /// 之外的任何做法破坏（见 ApplyShift）。</item>
+        /// </list>
+        /// <para>
+        /// 拖动过程中逐帧产生的点集变化会<b>就地合并</b>成一条记录（更新最新一条的
+        /// <c>AfterPoints</c>），因此一次拖拽按一次撤销回退，不会产生上百条历史。
+        /// </para>
+        /// </summary>
+        private sealed class IndependentInkHistory : IDisposable
         {
             private const int MaxHistoryCount = 200;
 
             private readonly InkCanvas _surface;
-            private readonly System.Collections.Generic.List<StrokeCollectionChangedEventArgs> _undo
-                = new System.Collections.Generic.List<StrokeCollectionChangedEventArgs>();
-            private readonly System.Collections.Generic.List<StrokeCollectionChangedEventArgs> _redo
-                = new System.Collections.Generic.List<StrokeCollectionChangedEventArgs>();
+            private readonly System.Collections.Generic.List<InkOperation> _undo
+                = new System.Collections.Generic.List<InkOperation>();
+            private readonly System.Collections.Generic.List<InkOperation> _redo
+                = new System.Collections.Generic.List<InkOperation>();
+
+            /// <summary>每条笔迹在「当前这次拖拽」开始前的点集（几何操作基线）。</summary>
+            private readonly System.Collections.Generic.Dictionary<Stroke, StylusPointCollection> _dragBaseline
+                = new System.Collections.Generic.Dictionary<Stroke, StylusPointCollection>();
+
             private bool _applying;
+            private bool _suppressed;
+            private bool _disposed;
 
             public event Action HistoryChanged;
 
@@ -825,6 +1267,11 @@ namespace Ink_Canvas.Controls
             {
                 _surface = surface;
                 surface.Strokes.StrokesChanged += OnStrokesChanged;
+
+                // 构造时画布可能已有墨迹（载入历史批注）：补齐订阅，否则这些笔迹的
+                // 框选移动不会被记录。注意此处必须处于「不记录」语义下，
+                // 建立基线本身不算一次操作。
+                foreach (Stroke stroke in surface.Strokes) AttachStroke(stroke);
             }
 
             public bool CanUndo => _undo.Count > 0;
@@ -832,12 +1279,98 @@ namespace Ink_Canvas.Controls
 
             private void OnStrokesChanged(object sender, StrokeCollectionChangedEventArgs e)
             {
-                if (_applying) return;
+                if (_disposed) return;
+
+                // 订阅维护必须无条件执行（即使处于 _applying/_suppressed），
+                // 否则撤销回放增删笔迹后，后续的框选移动会漏记。
+                if (e?.Removed != null)
+                {
+                    foreach (Stroke stroke in e.Removed)
+                    {
+                        DetachStroke(stroke);
+                        _dragBaseline.Remove(stroke);
+                    }
+                }
+
+                if (e?.Added != null)
+                {
+                    foreach (Stroke stroke in e.Added)
+                    {
+                        AttachStroke(stroke);
+                        // 建立几何基线：笔迹刚入集合时记下点集，之后框选拖动才有「拖动前」可比。
+                        // 对书写产生的笔迹，此处记录的就是原始点集；收笔后的平滑/形状纠正会走
+                        // Strokes.Replace（先移除再新增），新增的那条会重新建立基线，因此
+                        // 基线始终对应当前在集合中的那个对象。
+                        if (stroke != null && !_dragBaseline.ContainsKey(stroke))
+                            _dragBaseline[stroke] = stroke.StylusPoints.Clone();
+                    }
+                }
+
+                if (_applying || _suppressed) return;
                 if ((e.Added?.Count ?? 0) == 0 && (e.Removed?.Count ?? 0) == 0) return;
 
-                _undo.Add(new StrokeCollectionChangedEventArgs(
+                PushOperation(InkOperation.ForCollection(
                     e.Added != null ? new StrokeCollection(e.Added) : new StrokeCollection(),
                     e.Removed != null ? new StrokeCollection(e.Removed) : new StrokeCollection()));
+            }
+
+            private void AttachStroke(Stroke stroke)
+            {
+                if (stroke == null) return;
+                stroke.StylusPointsChanged -= OnStrokePointsChanged;
+                stroke.StylusPointsChanged += OnStrokePointsChanged;
+            }
+
+            private void DetachStroke(Stroke stroke)
+            {
+                if (stroke == null) return;
+                stroke.StylusPointsChanged -= OnStrokePointsChanged;
+            }
+
+            /// <summary>
+            /// 笔迹点集变化 = 框选工具在改几何（书写产生的笔迹是「先入集合、后不再变点集」，
+            /// 滚动同步走 <c>Transform</c> 不触发本事件）。
+            /// </summary>
+            private void OnStrokePointsChanged(object sender, EventArgs e)
+            {
+                if (_disposed || _applying || _suppressed) return;
+                if (sender is not Stroke stroke) return;
+                if (!_surface.Strokes.Contains(stroke)) return;
+
+                if (!_dragBaseline.TryGetValue(stroke, out var baseline))
+                {
+                    // 第一次见到这条笔迹变点集：此刻的「当前点集」已经是变化后的值，
+                    // 无法还原真正的初始值，因此退化为「本次变化前不可知」——
+                    // 用当前值作基线会让这次拖动不可撤销。为避免这种情况，
+                    // 基线在笔迹入集合时就已建立（见 AttachStroke + _dragBaseline 初始化）。
+                    return;
+                }
+
+                var after = stroke.StylusPoints.Clone();
+
+                // 合并：同一条笔迹在连续变化中只占一条记录，持续刷新 AfterPoints。
+                if (_undo.Count > 0)
+                {
+                    var top = _undo[_undo.Count - 1];
+                    if (top.IsPointsOperation && ReferenceEquals(top.PointStroke, stroke))
+                    {
+                        top.AfterPoints = after;
+                        _redo.Clear();
+                        HistoryChanged?.Invoke();
+                        return;
+                    }
+                }
+
+                PushOperation(InkOperation.ForPoints(stroke, baseline.Clone(), after));
+
+                // 本次拖拽已归档：把基线推进到「本段结束」，下一次独立拖动会开启新记录。
+                _dragBaseline[stroke] = after.Clone();
+            }
+
+            private void PushOperation(InkOperation op)
+            {
+                if (op == null) return;
+                _undo.Add(op);
                 if (_undo.Count > MaxHistoryCount)
                     _undo.RemoveAt(0);
                 _redo.Clear();
@@ -853,14 +1386,25 @@ namespace Ink_Canvas.Controls
                 _applying = true;
                 try
                 {
-                    if (op.Added.Count > 0) _surface.Strokes.Remove(op.Added);
-                    if (op.Removed.Count > 0) _surface.Strokes.Add(op.Removed);
+                    if (op.IsPointsOperation)
+                    {
+                        ApplyPoints(op.PointStroke, op.BeforePoints);
+                    }
+                    else
+                    {
+                        if (op.Added.Count > 0) _surface.Strokes.Remove(op.Added);
+                        if (op.Removed.Count > 0) _surface.Strokes.Add(op.Removed);
+                    }
+
                     _redo.Add(op);
                 }
                 finally
                 {
                     _applying = false;
                 }
+
+                // 撤销后基线重置为「当前实际状态」，下一次拖动从正确位置起算。
+                ResetBaselines();
                 HistoryChanged?.Invoke();
             }
 
@@ -873,23 +1417,114 @@ namespace Ink_Canvas.Controls
                 _applying = true;
                 try
                 {
-                    if (op.Removed.Count > 0) _surface.Strokes.Remove(op.Removed);
-                    if (op.Added.Count > 0) _surface.Strokes.Add(op.Added);
+                    if (op.IsPointsOperation)
+                    {
+                        ApplyPoints(op.PointStroke, op.AfterPoints);
+                    }
+                    else
+                    {
+                        if (op.Removed.Count > 0) _surface.Strokes.Remove(op.Removed);
+                        if (op.Added.Count > 0) _surface.Strokes.Add(op.Added);
+                    }
+
                     _undo.Add(op);
                 }
                 finally
                 {
                     _applying = false;
                 }
+
+                ResetBaselines();
                 HistoryChanged?.Invoke();
+            }
+
+            /// <summary>把点集写回笔迹（仅在 <c>_applying</c> 保护下调用，避免自我记录）。</summary>
+            private void ApplyPoints(Stroke stroke, StylusPointCollection points)
+            {
+                if (stroke == null || points == null) return;
+                if (!_surface.Strokes.Contains(stroke)) return;
+                stroke.StylusPoints = points.Clone();
+            }
+
+            /// <summary>把所有在集合中的笔迹基线重置为当前点集。</summary>
+            private void ResetBaselines()
+            {
+                _dragBaseline.Clear();
+                foreach (Stroke stroke in _surface.Strokes)
+                {
+                    if (stroke == null) continue;
+                    _dragBaseline[stroke] = stroke.StylusPoints.Clone();
+                }
             }
 
             public void Clear()
             {
+                _dragBaseline.Clear();
                 if (_undo.Count == 0 && _redo.Count == 0) return;
                 _undo.Clear();
                 _redo.Clear();
                 HistoryChanged?.Invoke();
+            }
+
+            /// <summary>
+            /// 在 using 作用域内暂停历史记录（该范围内对墨迹集合的增删都不进撤销栈）。
+            /// </summary>
+            public IDisposable SuppressRecording() => new RecordingScope(this);
+
+            /// <summary>抹掉某条笔迹对应的「新增」记录（用于渐隐笔迹等不应进入撤销栈的笔迹）。</summary>
+            public void ForgetAdditionOf(Stroke stroke)
+            {
+                if (stroke == null) return;
+                var changed = false;
+                for (var i = _undo.Count - 1; i >= 0; i--)
+                {
+                    var op = _undo[i];
+                    if (op.IsPointsOperation) continue;
+                    var isSingleAdd = op.Added.Count == 1 && ReferenceEquals(op.Added[0], stroke)
+                                      && op.Removed.Count == 0;
+                    if (!isSingleAdd) continue;
+                    _undo.RemoveAt(i);
+                    changed = true;
+                    break;
+                }
+
+                if (changed) HistoryChanged?.Invoke();
+            }
+
+            private sealed class RecordingScope : IDisposable
+            {
+                private readonly IndependentInkHistory _owner;
+                private readonly bool _previous;
+
+                public RecordingScope(IndependentInkHistory owner)
+                {
+                    _owner = owner;
+                    _previous = owner._suppressed;
+                    owner._suppressed = true;
+                }
+
+                public void Dispose() => _owner._suppressed = _previous;
+            }
+
+            /// <summary>
+            /// 解除全部订阅。本画布一旦被移除（解绑、切文档）就不再需要继续观察墨迹，
+            /// 但 <see cref="Stroke.StylusPointsChanged"/> 是「笔迹 → 本对象」的引用，
+            /// 不解绑会让每一条历史笔迹都继续持有本观察者。
+            /// </summary>
+            public void Dispose()
+            {
+                if (_disposed) return;
+                _disposed = true;
+
+                try { _surface.Strokes.StrokesChanged -= OnStrokesChanged; }
+                catch { /* 集合已失效，忽略 */ }
+
+                foreach (var stroke in _dragBaseline.Keys) DetachStroke(stroke);
+                foreach (Stroke stroke in _surface.Strokes) DetachStroke(stroke);
+
+                _dragBaseline.Clear();
+                _undo.Clear();
+                _redo.Clear();
             }
         }
     }

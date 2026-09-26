@@ -42,6 +42,12 @@ namespace Ink_Canvas
         /// <summary>待迁移首笔缓存上限（绑定完成前连续书写的笔迹最多迁移最近几笔）。</summary>
         private const int UILinkagePendingStrokeLimit = 8;
 
+        /// <summary>
+        /// 待迁移首笔的有效期：实时识别下单笔写入后画布通常在一个探测周期内建立，
+        /// 超时说明该笔与本次绑定无关（例如写在其它窗口上），不再迁移，避免误迁历史墨迹。
+        /// </summary>
+        private static readonly TimeSpan UILinkagePendingStrokeTtl = TimeSpan.FromSeconds(3);
+
         private static readonly TimeSpan UILinkagePollInterval = TimeSpan.FromMilliseconds(250);
 
         /// <summary>缩放指示元素查找冷却：缓存失效后短时间内不重复做状态栏 UIA 遍历。</summary>
@@ -89,6 +95,9 @@ namespace Ink_Canvas
             public HashSet<Stroke> StrokesAtTrigger;
             public Point FirstPointInkCanvas;
             public Point FirstPointScreen;
+
+            /// <summary>登记时刻：仅短时间内的笔迹才是「绑定尚未完成」的首笔，超时不再迁移。</summary>
+            public DateTime CreatedUtc;
         }
 
         /// <summary>
@@ -120,6 +129,13 @@ namespace Ink_Canvas
             public string DocName;
             public bool Bound;
 
+            /// <summary>
+            /// 该实例在「同一文档名」分组内的窗口槽位（1 起；0 = 未分配/已释放）。
+            /// 用作 <c>.isf</c> / <c>.state.json</c> 的持久化键后缀，必须是跨会话稳定的值
+            /// —— 因此不能用 HWND（见 <see cref="GetUILinkageWindowKeySuffix"/>）。
+            /// </summary>
+            public int WindowSlot;
+
             /// <summary>联动目标类型（Word / SumatraPDF）。</summary>
             public UILinkageTargetKind Kind = UILinkageTargetKind.Word;
 
@@ -148,6 +164,15 @@ namespace Ink_Canvas
 
             /// <summary>长截屏进行中：暂停 WordSync 对该实例的滚动同步，避免与截图滚动互相干扰。</summary>
             public bool IsCapturingLongScreenshot;
+
+            /// <summary>长截屏开始时刻，供看门狗判定卡死（见 <see cref="UILinkageCaptureWatchdogTimeout"/>）。</summary>
+            public DateTime CaptureStartedUtc = DateTime.MinValue;
+
+            /// <summary>
+            /// 「墨迹转形状」上下文（本画布专属的最近笔迹缓冲 / 已纠正圆列表 / 替换实现）。
+            /// 每块画布一份，避免与主画布的 <c>newStrokes</c>/<c>circles</c> 串写。
+            /// </summary>
+            public InkToShapeTargetContext InkToShapeContext;
 
             // ---- 缩放支持（状态栏缩放指示 + 墨迹按比例重缩放） ----
 
@@ -247,12 +272,38 @@ namespace Ink_Canvas
             };
             _uiLinkageTimer.Tick += (_, _) =>
             {
-                SyncUILinkageCanvasState();
-                UpdateUILinkageDebugUi();
-                UpdateUILinkageScrollSync();
-                UpdateUILinkageCanvasGeometry();
+                // 逐阶段独立兜底：一次 UIA/跨进程读取失败不应中断本轮其余阶段，
+                // 更不应把异常抛给 DispatcherUnhandledException（本应用会据此判定崩溃并弹窗/重启）。
+                RunUILinkageStage("实时识别", UpdateUILinkageForegroundWatch);
+                RunUILinkageStage("状态同步", SyncUILinkageCanvasState);
+                RunUILinkageStage("调试面板", UpdateUILinkageDebugUi);
+                RunUILinkageStage("滚动同步", UpdateUILinkageScrollSync);
+                RunUILinkageStage("几何跟随", UpdateUILinkageCanvasGeometry);
             };
             _uiLinkageTimer.Start();
+        }
+
+        private DateTime _uiLinkageStageErrorLogUtc = DateTime.MinValue;
+
+        /// <summary>
+        /// 执行一个 UI 联动轮询阶段并吞掉异常。异常按 5 秒节流写日志，
+        /// 避免目标窗口异常时每 250ms 刷一条。
+        /// </summary>
+        private void RunUILinkageStage(string stageName, Action stage)
+        {
+            try
+            {
+                stage();
+            }
+            catch (Exception ex)
+            {
+                var now = DateTime.UtcNow;
+                if ((now - _uiLinkageStageErrorLogUtc).TotalSeconds < 5) return;
+                _uiLinkageStageErrorLogUtc = now;
+                LogHelper.WriteLogToFile(
+                    $"UI联动轮询阶段「{stageName}」异常（已跳过本轮该阶段）: {ex.Message}",
+                    LogHelper.LogType.Warning);
+            }
         }
 
         /// <summary>轮询刷新调试面板与高亮边框：仅做廉价的位置/信息读取，不做整树遍历。</summary>
@@ -262,6 +313,8 @@ namespace Ink_Canvas
 
             if (!UILinkageIsDebugEnabled)
             {
+                // 面板隐藏时同步退出鼠标抓取（钩子只在抓取期间安装）。
+                SetUILinkageGrabMode(false);
                 UILinkageDebugHud.Visibility = Visibility.Collapsed;
                 UILinkageDebugHighlight.Visibility = Visibility.Collapsed;
                 CollapseUILinkageOcclusion();
@@ -275,14 +328,17 @@ namespace Ink_Canvas
         }
 
         /// <summary>
-        /// 墨迹提交后处理：首笔位置即采集点，定位批注层后方窗口内命中的组件。
+        /// 墨迹提交后处理：调试状态下首笔位置即采集点，定位批注层后方窗口内命中的组件。
+        /// 非调试状态的识别已改为「实时读取当前焦点窗口 + 监听其树」（见 MW_UILinkageWatch.cs），
+        /// 这里只登记待迁移首笔，不再做整树采样。
         /// 只同步做代价极低的 Win32 取窗，昂贵的 UIA 整树遍历放到后台线程。
         /// </summary>
         internal void HandleUILinkageDebugAfterStroke(Stroke stroke)
         {
             try
             {
-                if (!UILinkageIsDebugEnabled && !UILinkageHasAnyTargetEnabled) return;
+                bool debug = UILinkageIsDebugEnabled;
+                if (!debug && !UILinkageHasAnyTargetEnabled) return;
                 if (stroke == null || stroke.StylusPoints.Count == 0) return;
                 if (inkCanvas == null) return;
 
@@ -305,11 +361,15 @@ namespace Ink_Canvas
                         StrokeReference = stroke,
                         StrokesAtTrigger = new HashSet<Stroke>(inkCanvas.Strokes),
                         FirstPointInkCanvas = stroke.StylusPoints[0].ToPoint(),
-                        FirstPointScreen = screenPt
+                        FirstPointScreen = screenPt,
+                        CreatedUtc = DateTime.UtcNow
                     });
                     while (_uiLinkagePendingStrokes.Count > UILinkagePendingStrokeLimit)
                         _uiLinkagePendingStrokes.RemoveAt(0);
                 }
+
+                // 非调试状态：识别由焦点窗口实时监听负责，不做整树采样。
+                if (!debug) return;
 
                 // 节流：同一窗口短时间内不重复遍历。
                 if (hwnd == _lastCaptureHwnd && (DateTime.UtcNow - _lastCaptureTimeUtc) < UILinkageCaptureThrottle)
@@ -345,14 +405,21 @@ namespace Ink_Canvas
             }
         }
 
-        /// <summary>后台线程：UIA 整树遍历 + 组件定位 + 信息字符串生成，结果经 Dispatcher 回到 UI。</summary>
+        /// <summary>
+        /// 后台线程：UIA 整树遍历 + 组件定位 + 信息字符串生成，结果经 Dispatcher 回到 UI。
+        /// <paramref name="usePointHitTest"/> 为 true（鼠标抓取）时优先用 UIA 命中测试取该点组件，
+        /// 并排除自身进程元素；失败时退回在目标窗口子树内定位。
+        /// </summary>
         private void CaptureOnBackground(
-            IntPtr hwnd, Point screenPt, IntPtr selfHwnd, bool wordEnabled, bool sumatraEnabled, bool showTree)
+            IntPtr hwnd, Point screenPt, IntPtr selfHwnd, bool wordEnabled, bool sumatraEnabled, bool showTree,
+            bool usePointHitTest = false)
         {
             try
             {
                 var windowEl = AutomationElement.FromHandle(hwnd);
-                var element = FindDeepestContaining(windowEl, screenPt);
+                var element = usePointHitTest
+                    ? FindElementAtPointExcludingSelf(screenPt, selfHwnd) ?? FindDeepestContaining(windowEl, screenPt)
+                    : FindDeepestContaining(windowEl, screenPt);
 
                 bool isWord = wordEnabled && IsWordWindow(windowEl);
                 bool isSumatra = sumatraEnabled && IsSumatraPdfWindow(windowEl);
@@ -514,8 +581,16 @@ namespace Ink_Canvas
             if (UILinkageDebugHudText == null) return;
 
             var sb = new StringBuilder();
+
+            // 抓取模式状态行：提示当前处于「单击采样」状态与退出方式。
+            if (_uiLinkageGrabModeActive)
+            {
+                sb.AppendLine(UILinkageGrabStatusText);
+                sb.AppendLine();
+            }
+
             sb.Append(string.IsNullOrEmpty(_uiLinkageCachedInfo)
-                ? "（尚未捕捉组件，请在批注层书写后采样）"
+                ? UILinkageNoCaptureText
                 : _uiLinkageCachedInfo);
 
             if (_uiLinkageShowTree && _uiLinkageCachedTree != null)
@@ -646,6 +721,30 @@ namespace Ink_Canvas
             return best;
         }
 
+        /// <summary>
+        /// 用 UIA 命中测试取该屏幕点下最深的组件，并排除自身进程窗口
+        /// （鼠标抓取时点击可能先落在本应用批注层上）。命中自身或读取失败返回 null，
+        /// 由调用方退回在目标窗口子树内定位。
+        /// </summary>
+        private static AutomationElement FindElementAtPointExcludingSelf(Point screenPt, IntPtr selfHwnd)
+        {
+            try
+            {
+                uint selfPid = UILinkageWindowFinder.GetWindowProcessId(selfHwnd);
+                var element = AutomationElement.FromPoint(screenPt);
+                if (element == null) return null;
+
+                int pid = element.Current.ProcessId;
+                if (selfPid != 0 && (uint)pid == selfPid) return null;
+
+                return element;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         private static string SafeRead(Func<string> read)
         {
             try { return read(); }
@@ -707,7 +806,7 @@ namespace Ink_Canvas
         private static string BuildDetailedInfo(AutomationElement el, AutomationElement windowEl)
         {
             if (el == null)
-                return "（尚未捕捉组件，请在批注层书写后采样）";
+                return UILinkageNoCaptureText;
 
             var sb = new StringBuilder();
             sb.AppendLine("=== UI 联动采样信息 ===");
@@ -1094,6 +1193,9 @@ namespace Ink_Canvas
                 ShowHorizontalScrollBar = true
             };
             Panel.SetZIndex(canvas, UILinkageCanvasZIndex);
+            // 收笔后处理（压感归一 + 平滑）挂在独立画布自己的笔迹集合上，
+            // 复用宿主现成服务，不经过主画布的 ProcessCommittedStroke。
+            canvas.InkSurface.StrokeCollected += IndependentCanvas_StrokeCollected;
             InkCanvasGridForInkReplay?.Children.Add(canvas);
             return canvas;
         }
@@ -1137,6 +1239,9 @@ namespace Ink_Canvas
                 var captured = inst;
                 inst.Canvas.OnUserScroll = (o, v) => OnUILinkageCanvasUserScroll(captured, o, v);
                 inst.Canvas.OnScrollStepRequested = (o, d) => OnUILinkageCanvasScrollStep(captured, o, d);
+                // 墨迹活动归属跟踪：新画布从「未被批注过」开始，避免 Ctrl+Z 被路由到空白画布。
+                AttachUILinkageInkActivityTracking(inst.Canvas);
+                ResetUILinkageInkActivity();
                 _uiLinkageInstances.Add(inst);
             }
             else
@@ -1153,6 +1258,8 @@ namespace Ink_Canvas
             if (created)
             {
                 inst.DocName = docName;
+                // 持久化键的窗口槽位必须在 LoadUILinkageInk 之前定下来（载入路径要用它派生文件名）。
+                AssignUILinkageWindowSlot(inst);
                 // SumatraPDF：先做一次滚动单位端点校准（画布尚未展示，端点往返不可见）。
                 if (kind == UILinkageTargetKind.SumatraPdf)
                     CalibrateUILinkageSumatraScroll(inst, r);
@@ -1168,9 +1275,15 @@ namespace Ink_Canvas
                 SaveUILinkageScrollPosition(inst);
                 SaveUILinkageInk(inst);
                 inst.Canvas.Strokes.Clear();
+                // 换文档 = 释放旧文档的槽位，再为新文档重新分配（否则旧槽位会被本实例一直占着，
+                // 导致同文档的另一个窗口被挤到更高的槽位、键随开关顺序漂移）。
+                inst.WindowSlot = 0;
                 inst.DocName = docName;
+                AssignUILinkageWindowSlot(inst);
                 // 新文档内容坐标系与旧帧无关：重置滚动帧，载入的内容锚定墨迹才能对齐。
                 inst.Canvas.ResetScrollFrame();
+                // 形状识别缓冲绑定的是旧文档的笔迹引用与坐标，必须一并清空。
+                ResetUILinkageInkToShapeBuffer(inst);
                 // SumatraPDF：新文档布局不同，重新校准滚动单位。
                 if (kind == UILinkageTargetKind.SumatraPdf)
                     CalibrateUILinkageSumatraScroll(inst, r);
@@ -1204,6 +1317,9 @@ namespace Ink_Canvas
                 inst.Canvas?.FlushScrollAnimation();
                 SaveUILinkageInk(inst);
                 inst.Bound = false;
+                // 释放文档内窗口槽位：下一个打开同名文档的窗口会补进这个空位，
+                // 键不会因为「谁先谁后」而漂移。
+                inst.WindowSlot = 0;
                 _uiLinkageInstances.Remove(inst);
 
                 if (captureLongScreenshot && StartUILinkageLongScreenshotCapture(inst))
@@ -1214,6 +1330,9 @@ namespace Ink_Canvas
             {
                 inst.Canvas.Visibility = Visibility.Collapsed;
                 InkCanvasGridForInkReplay?.Children.Remove(inst.Canvas);
+                // 解绑后这块画布不再被使用：解除撤销历史对每条笔迹 StylusPointsChanged 的订阅。
+                // 必须放在长截屏分支之后 —— 截图期间画布还留在屏幕上，历史仍要被保留。
+                inst.Canvas.ReleaseSubscriptions();
             }
         }
 
@@ -1236,14 +1355,27 @@ namespace Ink_Canvas
         {
             if (inst?.Canvas == null || _uiLinkagePendingStrokes.Count == 0) return;
 
+            // 先把未烘焙的滚动位移落进笔迹数据，保证 AppliedScrollOffset 与视觉一致。
+            inst.Canvas.FlushScrollAnimation();
+
+            // 坐标换算（见 IndependentCanvas 的坐标不变式）：
+            //   独立画布笔迹的数据坐标 d = 视口坐标 p - S（S = 已应用的滚动偏移），
+            //   而主画布坐标到视口坐标只差画布 Margin。故 d = p - Margin - S。
+            // 少减 S 会让迁入的笔迹整体偏移一个文档滚动距离。
             var margin = inst.Canvas.Margin;
-            var toLocalMatrix = new Matrix(1, 0, 0, 1, -margin.Left, -margin.Top);
+            var scrollOffset = inst.Canvas.AppliedScrollOffset;
+            var toLocalMatrix = new Matrix(1, 0, 0, 1,
+                -margin.Left - scrollOffset.X, -margin.Top - scrollOffset.Y);
+            var nowUtc = DateTime.UtcNow;
 
             foreach (var pending in _uiLinkagePendingStrokes)
             {
                 try
                 {
                     if (pending?.StrokesAtTrigger == null || inkCanvas == null) continue;
+
+                    // 超时的登记笔迹与本次绑定无关（实时识别下画布建立通常只需一个探测周期）。
+                    if (nowUtc - pending.CreatedUtc > UILinkagePendingStrokeTtl) continue;
 
                     // 在触发后新增的笔画里解析替换后的那一笔（外接框覆盖触发首点、距离最近者）。
                     Stroke target = null;
@@ -1284,11 +1416,36 @@ namespace Ink_Canvas
                     var screenPt = inkCanvas.PointToScreen(target.StylusPoints[0].ToPoint());
                     if (!inst.ScreenRect.Contains(screenPt)) continue;
 
-                    target.Transform(toLocalMatrix, false);
-                    // 主画布 StrokesChanged 会自动提交「擦除」历史，主画布撤销可还原该笔。
-                    inkCanvas.Strokes.Remove(target);
+                    // 迁入独立画布用「克隆」而不是搬运同一个对象：同一 Stroke 被两个
+                    // StrokeCollection 同时持有是 WPF 允许的（不抛异常），但主画布 TimeMachine
+                    // 里那条「删除」历史仍引用原对象，之后在主画布撤销会把原对象重新加回主画布，
+                    // 于是同一笔被渲染两次、两个撤销栈互相争抢。克隆让两侧彻底解耦。
+                    var migrated = target.Clone();
+                    migrated.Transform(toLocalMatrix, false);
+
+                    // 迁移对主画布而言只是「这一笔从此归独立画布管」，不是用户擦除，
+                    // 因此必须在 CodeInput 抑制下移除：否则
+                    //   ① TimeMachine 会记一条可撤销的「擦除」，主画布 Ctrl+Z / 工具栏撤销
+                    //      会把原笔迹贴回主画布 —— 而独立画布上的克隆还在，一笔两画布；
+                    //   ② 若此刻正处橡皮擦模式，这条删除还会被 MW_TimeMachine 的
+                    //      AddedStroke/ReplacedStroke 批处理吞掉（:749-756），
+                    //      在抬笔时被误提交成一次「用户擦除」。
+                    // CodeInput 分支在 StrokesOnStrokesChanged 早退（MW_TimeMachine.cs:739），
+                    // 只是不写历史，笔迹集合本身照常变更。
+                    // 独立画布自己的撤销栈挂在独立画布集合上，不受此处影响，迁移仍可撤销。
+                    var previousCommitType = _currentCommitType;
+                    _currentCommitType = CommitReason.CodeInput;
+                    try
+                    {
+                        inkCanvas.Strokes.Remove(target);
+                    }
+                    finally
+                    {
+                        _currentCommitType = previousCommitType;
+                    }
+
                     // 独立画布历史自动记录新增，可在独立画布内撤销。
-                    inst.Canvas.Strokes.Add(target);
+                    inst.Canvas.Strokes.Add(migrated);
                 }
                 catch (Exception ex)
                 {
@@ -1312,7 +1469,16 @@ namespace Ink_Canvas
             return false;
         }
 
-        /// <summary>按主画布坐标查找该点所在的可见绑定实例。</summary>
+        /// <summary>
+        /// 按主画布坐标查找该点所在的可见绑定实例。
+        /// <para>
+        /// 多个实例的视口可能重叠（两个 Word 窗口互相遮挡），此时必须返回 <b>Z 序最高</b>
+        /// 的那个 —— 即后加入画布层的实例。所有联动画布的 <c>Panel.ZIndex</c> 都是
+        /// <see cref="UILinkageCanvasZIndex"/>（600）且相等，因此「最后创建/最后加入」就是
+        /// 实际显示在最上层的那个。历史实现取 <c>FirstOrDefault</c>（最早创建的那个），
+        /// 会把输入、擦除、撤销都投给被遮挡在下面的文档 —— 跨文档串写。
+        /// </para>
+        /// </summary>
         internal bool TryGetUILinkageInstanceAt(Point inkCanvasPoint, out UILinkageCanvasInstance instance)
         {
             instance = null;
@@ -1320,11 +1486,18 @@ namespace Ink_Canvas
             try
             {
                 var screenPt = inkCanvas.PointToScreen(inkCanvasPoint);
-                instance = _uiLinkageInstances.FirstOrDefault(i =>
-                    i.Bound && i.Canvas != null
-                    && i.Canvas.Visibility == Visibility.Visible
-                    && i.ScreenRect.Contains(screenPt));
-                return instance != null;
+                // 逆序遍历 = 从最上层往下找，命中即返回。
+                for (var i = _uiLinkageInstances.Count - 1; i >= 0; i--)
+                {
+                    var candidate = _uiLinkageInstances[i];
+                    if (candidate?.Bound != true || candidate.Canvas == null) continue;
+                    if (candidate.Canvas.Visibility != Visibility.Visible) continue;
+                    if (!candidate.ScreenRect.Contains(screenPt)) continue;
+                    instance = candidate;
+                    return true;
+                }
+
+                return false;
             }
             catch
             {
@@ -1338,9 +1511,22 @@ namespace Ink_Canvas
                 i.Bound && i.Canvas != null && i.Canvas.Visibility == Visibility.Visible);
 
         /// <summary>
-        /// 把主画布(inkCanvas)坐标点换算为指定实例独立画布的本地坐标。
-        /// 独立画布与主画布同处 InkCanvasGridForInkReplay 且无渲染变换，
-        /// 本地坐标 = 主坐标 - 画布 Margin。
+        /// 是否存在可见的联动画布墨迹。
+        /// 清空按钮需要据此判断「该不该走清屏流程」：主画布为空但 Word 上有批注时，
+        /// 若只看主画布就不会清到联动墨迹。
+        /// </summary>
+        internal bool HasVisibleUILinkageInk()
+            => GetVisibleBoundUILinkageInstances().Any(i => i.Canvas.Strokes.Count > 0);
+
+        /// <summary>
+        /// 把主画布(inkCanvas)坐标点换算为指定实例独立画布的「笔迹数据坐标」，
+        /// 可直接用于对该实例 StrokeCollection 的命中测试与几何运算。
+        /// <para>
+        /// 独立画布与主画布同处 InkCanvasGridForInkReplay 且无渲染变换，视口坐标 = 主坐标 - Margin；
+        /// 但滚动同步是靠把整个笔迹集合 Transform 平移实现的，数据坐标相对视口又偏移了
+        /// -S（S = <see cref="Ink_Canvas.Controls.IndependentCanvas.AppliedScrollOffset"/>）。
+        /// 故 d = 主坐标 - Margin - S。少减 S 会让橡皮擦在错误位置下刀。
+        /// </para>
         /// </summary>
         internal bool TryGetUILinkageLocalPoint(Point inkCanvasPoint, out Point localPoint)
             => TryGetUILinkageLocalPoint(inkCanvasPoint, null, out localPoint);
@@ -1352,8 +1538,26 @@ namespace Ink_Canvas
             if (instance == null && !TryGetUILinkageInstanceAt(inkCanvasPoint, out instance)) return false;
             if (instance?.Canvas == null || instance.Canvas.Visibility != Visibility.Visible) return false;
 
+            // 显式传入实例时也必须校验点位确实落在它的视口内：橡皮擦在一段拖拽中会复用
+            // 已解析的实例，若不校验，拖回白板后仍会按该实例换算并擦除 Word 上的批注。
+            try
+            {
+                var screenPt = inkCanvas.PointToScreen(inkCanvasPoint);
+                if (!instance.ScreenRect.Contains(screenPt)) return false;
+            }
+            catch
+            {
+                return false;
+            }
+
+            // 先把未烘焙的滚动位移落进笔迹数据，否则本次换算会与正在动画中的偏移错开。
+            instance.Canvas.FlushScrollAnimation();
+
             var margin = instance.Canvas.Margin;
-            localPoint = new Point(inkCanvasPoint.X - margin.Left, inkCanvasPoint.Y - margin.Top);
+            var scrollOffset = instance.Canvas.AppliedScrollOffset;
+            localPoint = new Point(
+                inkCanvasPoint.X - margin.Left - scrollOffset.X,
+                inkCanvasPoint.Y - margin.Top - scrollOffset.Y);
             return true;
         }
 
@@ -1403,8 +1607,12 @@ namespace Ink_Canvas
                     var attrs = inkCanvas.DefaultDrawingAttributes;
                     if (attrs != null)
                     {
+                        // 整体克隆而不是白名单比对：荧光笔（IsHighlighter + StylusTip=Rectangle）、
+                        // IgnorePressure、FitToCurve、StylusTipTransform 都靠 DrawingAttributes 承载，
+                        // 只比 Color/Width/Height 会让独立画布永远停在默认的椭圆不透明硬笔上。
+                        // IsHighlighter 变化时 Color/Width/Height 往往不变，必须一并纳入判定。
                         var cur = inst.Canvas.InkSurface.DefaultDrawingAttributes;
-                        if (cur == null || cur.Color != attrs.Color || cur.Width != attrs.Width || cur.Height != attrs.Height)
+                        if (cur == null || !DrawingAttributesEquivalent(cur, attrs))
                             inst.Canvas.InkSurface.DefaultDrawingAttributes = attrs.Clone();
                     }
 
@@ -1415,9 +1623,62 @@ namespace Ink_Canvas
                 if (inst.Canvas.IsHitTestVisible != interactive)
                     inst.Canvas.IsHitTestVisible = interactive;
 
+                // 触摸抑制：多指手势结束时恢复到宿主当前的逻辑模式，而不是画布当时的物理模式
+                // （原生笔模式下物理模式是 None，照抄会把画布永久禁用）。
+                inst.Canvas.TouchUserEditingMode = interactive
+                    ? InkCanvasEditingMode.Ink
+                    : InkCanvasEditingMode.None;
+                inst.Canvas.TouchSuppressionEnabled = interactive;
+
+                // 手掌擦：与主画布共用同一套接触面积判定与设置（见 BuildPalmEraserPolicy）。
+                // 判定放在宿主这一侧（internal 的 PalmEraserPolicy / PalmEraserCalculator 不出圈），
+                // 独立画布只拿到一个「宽高 in、擦头宽度 out」的原始类型委托。
+                // isActive 传该画布自己的 IsPalmErasing：策略里的 IsActive 为真时
+                // Evaluate 走「已在擦除中」分支、不再返回 ActivatesEraser，
+                // 用错状态会让第二次落掌被误判成首次激活。
+                // 只在尚未挂接时创建一次委托，避免每 250ms 分配新闭包。
+                if (inst.Canvas.PalmContactClassifier == null)
+                {
+                    inst.Canvas.PalmContactClassifier = (double contactW, double contactH, out double eraserWidth) =>
+                    {
+                        eraserWidth = 0;
+                        var evaluation = Ink_Canvas.Ink.PalmEraserCalculator.Evaluate(
+                            contactW, contactH, BuildPalmEraserPolicy(inst.Canvas.IsPalmErasing));
+                        if (!evaluation.ActivatesEraser) return false;
+                        eraserWidth = evaluation.EraserWidthDip;
+                        return true;
+                    };
+                }
+
                 // 鼠标模式下暂停显示滚动条与撤销/恢复按钮（无法交互）。
                 inst.Canvas.SetScrollBarsSuppressed(!interactive);
             }
+        }
+
+        /// <summary>
+        /// 两个 <see cref="DrawingAttributes"/> 是否在「影响绘制结果」的维度上等价。
+        /// 用于避免每拍（250ms）都克隆一次属性对象，同时保证荧光笔等属性变化能被察觉。
+        /// </summary>
+        private static bool DrawingAttributesEquivalent(DrawingAttributes a, DrawingAttributes b)
+        {
+            if (ReferenceEquals(a, b)) return true;
+            if (a == null || b == null) return false;
+
+            return a.Color == b.Color
+                && a.Width == b.Width
+                && a.Height == b.Height
+                && a.StylusTip == b.StylusTip
+                && a.IsHighlighter == b.IsHighlighter
+                && a.IgnorePressure == b.IgnorePressure
+                && a.FitToCurve == b.FitToCurve
+                && StylusTipTransformEquals(a.StylusTipTransform, b.StylusTipTransform);
+        }
+
+        private static bool StylusTipTransformEquals(Matrix a, Matrix b)
+        {
+            return a.M11 == b.M11 && a.M12 == b.M12
+                && a.M21 == b.M21 && a.M22 == b.M22
+                && a.OffsetX == b.OffsetX && a.OffsetY == b.OffsetY;
         }
 
         /// <summary>
@@ -1802,6 +2063,23 @@ namespace Ink_Canvas
                 var r = GetUILinkageViewportRect(inst);
                 if (r.IsEmpty || r.Width <= 0 || r.Height <= 0) continue;
 
+                // 看门狗：截图任务若没能正常收尾（未调度/线程被杀），标志会一直挂着，
+                // 该实例的滚动同步与画布外观将永久卡在截图态，这里兜底复位。
+                if (inst.IsCapturingLongScreenshot
+                    && inst.CaptureStartedUtc != DateTime.MinValue
+                    && DateTime.UtcNow - inst.CaptureStartedUtc > UILinkageCaptureWatchdogTimeout)
+                {
+                    LogHelper.WriteLogToFile(
+                        $"UI联动长截屏超时（>{UILinkageCaptureWatchdogTimeout.TotalSeconds:F0}s），强制复位截图状态",
+                        LogHelper.LogType.Warning);
+                    ResetUILinkageCaptureState(inst);
+                }
+
+                // 长截屏期间视口几何已在启动时快照（拼接步距按当时尺寸计算）。若此刻仍去
+                // SetViewportSize 会每拍触发一次布局，可能在两个切片之间改变画布尺寸；
+                // 视口矩形没变就复用之，避免拼接错位与逐拍重排。
+                if (inst.IsCapturingLongScreenshot && inst.ScreenRect == r) continue;
+
                 UpdateUILinkageInstanceGeometry(inst, r);
 
                 // 同窗口文档切换检测（轮询兜底，窗口标题变化即换绑墨迹）。
@@ -1811,9 +2089,14 @@ namespace Ink_Canvas
                     SaveUILinkageScrollPosition(inst);
                     SaveUILinkageInk(inst);
                     inst.Canvas.Strokes.Clear();
+                    // 轮询兜底换档：与 BindUILinkageCanvas 的换文档分支保持同一套槽位/缓冲重置，
+                    // 否则两条路径的行为会不一致（旧槽位残留、形状识别缓冲跨文档串用）。
+                    inst.WindowSlot = 0;
                     inst.DocName = currentName;
+                    AssignUILinkageWindowSlot(inst);
                     // 新文档内容坐标系与旧帧无关：重置滚动帧，载入的内容锚定墨迹才能对齐。
                     inst.Canvas.ResetScrollFrame();
+                    ResetUILinkageInkToShapeBuffer(inst);
                     // SumatraPDF：新文档布局不同，重新校准滚动单位（端点往返发生在换档瞬间）。
                     if (inst.Kind == UILinkageTargetKind.SumatraPdf)
                         CalibrateUILinkageSumatraScroll(inst, r);
@@ -2022,10 +2305,110 @@ namespace Ink_Canvas
 
         // ---------------- 滚动位置记忆（按文档，json sidecar） ----------------
 
-        private static string GetUILinkageStatePath(string docName)
+        /// <summary>
+        /// 本实例的持久化键后缀（文档内的窗口槽位）。
+        /// <para>
+        /// <b>必须是跨会话稳定的值。</b>历史实现用绑定窗口句柄（<c>_h{hwnd:x}</c>）做后缀：
+        /// 它确实能区分同会话内的多个窗口，但 HWND 每次进程启动都由系统重新分配，
+        /// 于是下一次运行算出的键与上一次不同 —— 载入时找不到文件，而上一次保存又把
+        /// 无后缀的旧版文件删掉了，<b>批注就此永久失联（磁盘上留孤儿文件）</b>。
+        /// 反向还会串档：HWND 被复用给另一个 Word 窗口且文档 sanitize 后同名时，
+        /// 会把别档的批注载进来。
+        /// </para>
+        /// <para>
+        /// 现在的键 = 文档名（sanitize 后）+ 该文档在本程序内的窗口序号。序号由
+        /// <see cref="AssignUILinkageWindowSlot"/> 在绑定/解绑时按「该文档当前占用的最小空闲槽」
+        /// 分配，因此：单窗口场景恒为槽 1、键完全稳定（跨会话可命中）；同文档多窗口时
+        /// 依次占用槽 2、3…；关掉一个窗口后其槽位立即被回收，下次打开仍落到最小空闲槽，
+        /// 使「最常见的那份文档」始终落在稳定的主键上。
+        /// </para>
+        /// </summary>
+        private static string GetUILinkageWindowKeySuffix(UILinkageCanvasInstance inst)
         {
-            return Path.Combine(App.RootPath, "UILinkageInk", SanitizeFileName(docName) + ".state.json");
+            var slot = inst?.WindowSlot ?? 0;
+            if (slot <= 1) return string.Empty; // 槽 1 = 主键，不带后缀，与旧版文件名兼容
+            return "_w" + slot.ToString(System.Globalization.CultureInfo.InvariantCulture);
         }
+
+        /// <summary>
+        /// 为实例分配文档内窗口槽位：取该文档名当前未被其它实例占用的最小正整数槽。
+        /// 在实例创建时调用一次；解绑时把 <see cref="UILinkageCanvasInstance.WindowSlot"/>
+        /// 置 0 即视为释放（本方法只看仍绑定且槽位非 0 的实例）。
+        /// </summary>
+        private void AssignUILinkageWindowSlot(UILinkageCanvasInstance inst)
+        {
+            if (inst == null) return;
+
+            var docKey = SanitizeFileName(inst.DocName ?? string.Empty);
+            var used = new HashSet<int>();
+            foreach (var other in _uiLinkageInstances)
+            {
+                if (other == null || ReferenceEquals(other, inst)) continue;
+                if (other.WindowSlot <= 0) continue;
+                if (!string.Equals(SanitizeFileName(other.DocName ?? string.Empty), docKey, StringComparison.Ordinal))
+                    continue;
+                used.Add(other.WindowSlot);
+            }
+
+            var slot = 1;
+            while (used.Contains(slot)) slot++;
+            inst.WindowSlot = slot;
+        }
+
+        /// <summary>
+        /// 回收孤儿持久化文件：本程序早期版本用 HWND 做后缀（<c>_h{hwnd:x}</c>），
+        /// 那些文件在新键下永远不会被命中。当规范路径不存在时，按文档名回退到一个
+        /// <c>_h*.isf</c> / <c>_h*.state.json</c> 已存在文件，
+        /// 让「刚好用过那个缺陷版本」的用户也能找回批注，而不是面对一片空白。
+        /// 只读取、不删除，避免误伤另一个同名文档的孤儿文件。
+        /// </summary>
+        private static string TryFindOrphanedHwndKeyedPath(string docName, string extensionSuffix)
+        {
+            try
+            {
+                var dir = Path.Combine(App.RootPath, "UILinkageInk");
+                if (!Directory.Exists(dir)) return null;
+
+                var stem = SanitizeFileName(docName) + "_h";
+                var matches = Directory.GetFiles(dir, stem + "*" + extensionSuffix);
+                if (matches.Length == 0) return null;
+
+                // 多个孤儿文件时取最近写入的那个（最可能是用户最后使用的那份）。
+                var best = matches[0];
+                var bestTime = File.GetLastWriteTimeUtc(best);
+                for (var i = 1; i < matches.Length; i++)
+                {
+                    var t = File.GetLastWriteTimeUtc(matches[i]);
+                    if (t > bestTime)
+                    {
+                        best = matches[i];
+                        bestTime = t;
+                    }
+                }
+
+                LogHelper.WriteLogToFile(
+                    $"UI联动：命中旧版 HWND 键的孤儿墨迹文件，已改为读取 {Path.GetFileName(best)}（下次保存将迁移到稳定键）",
+                    LogHelper.LogType.Info);
+                return best;
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"UI联动孤儿文件查找失败: {ex.Message}", LogHelper.LogType.Warning);
+                return null;
+            }
+        }
+
+        private static string GetUILinkageStatePath(string docName, string windowKeySuffix = "")
+        {
+            return Path.Combine(App.RootPath, "UILinkageInk",
+                SanitizeFileName(docName) + windowKeySuffix + ".state.json");
+        }
+
+        /// <summary>
+        /// 旧版（不带窗口后缀）的状态文件路径。读取时作为兜底，保证升级后既有记忆不丢。
+        /// </summary>
+        private static string GetUILinkageLegacyStatePath(string docName)
+            => GetUILinkageStatePath(docName);
 
         /// <summary>
         /// 记忆当前状态：<paramref name="inst"/> 上进行过墨迹书写（Strokes 非空）时，
@@ -2051,7 +2434,7 @@ namespace Ink_Canvas
                     ZoomPercent = inst.LastZoomPercent,
                     UpdatedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
                 };
-                var path = GetUILinkageStatePath(inst.DocName);
+                var path = GetUILinkageStatePath(inst.DocName, GetUILinkageWindowKeySuffix(inst));
                 Directory.CreateDirectory(Path.GetDirectoryName(path));
                 File.WriteAllText(path, JsonConvert.SerializeObject(state));
             }
@@ -2070,8 +2453,13 @@ namespace Ink_Canvas
                 if (s == null || !s.RememberScrollPosition) return;
                 if (inst?.DocElement == null || string.IsNullOrWhiteSpace(inst.DocName)) return;
 
-                var path = GetUILinkageStatePath(inst.DocName);
-                if (!File.Exists(path)) return;
+                var path = GetUILinkageStatePath(inst.DocName, GetUILinkageWindowKeySuffix(inst));
+                // 兜底顺序同 LoadUILinkageInk：稳定键 → 旧版无后缀 → 旧版 HWND 键孤儿文件。
+                if (!File.Exists(path))
+                    path = GetUILinkageLegacyStatePath(inst.DocName);
+                if (!File.Exists(path))
+                    path = TryFindOrphanedHwndKeyedPath(inst.DocName, ".state.json");
+                if (string.IsNullOrEmpty(path) || !File.Exists(path)) return;
 
                 var state = JsonConvert.DeserializeObject<UILinkageScrollState>(File.ReadAllText(path));
                 if (state == null || double.IsNaN(state.VerticalPercent)) return;
@@ -2133,6 +2521,14 @@ namespace Ink_Canvas
 
         /// <summary>单次长截屏允许的最大切片数，防止超长文档失控。</summary>
         private const int UILinkageMaxCapturePositions = 24;
+
+        /// <summary>
+        /// 长截屏看门狗超时。正常一轮（≤24 切片）远小于该值；超过说明截图任务没能正常收尾
+        /// （例如 <c>Task.Run</c> 未被调度、后台线程被杀），此时必须复位
+        /// <c>IsCapturingLongScreenshot</c>，否则该实例的滚动同步会被永久禁用、
+        /// 画布永远停在无边框模式。
+        /// </summary>
+        private static readonly TimeSpan UILinkageCaptureWatchdogTimeout = TimeSpan.FromSeconds(90);
 
         /// <summary>一段长截屏的滚动区间（内容偏移 DIP：视口顶起点 / 终点）。</summary>
         private sealed class UILinkageCaptureSnapshot
@@ -2198,6 +2594,7 @@ namespace Ink_Canvas
                 }
 
                 inst.IsCapturingLongScreenshot = true;
+                inst.CaptureStartedUtc = DateTime.UtcNow;
                 inst.Canvas.BeginChromelessCapture();
 
                 var snapshot = new UILinkageCaptureSnapshot
@@ -2226,12 +2623,34 @@ namespace Ink_Canvas
             catch (Exception ex)
             {
                 LogHelper.WriteLogToFile($"UI联动长截屏启动失败: {ex.Message}", LogHelper.LogType.Warning);
-                if (inst != null)
-                {
-                    inst.IsCapturingLongScreenshot = false;
-                    inst.Canvas?.EndChromelessCapture();
-                }
+                ResetUILinkageCaptureState(inst);
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// 复位实例的长截屏状态：清除「进行中」标志与起始时刻，并还原画布的无边框截图外观。
+        /// <para>
+        /// 长截屏有三处收尾（正常完成、启动异常、看门狗超时），必须共用同一段复位逻辑：
+        /// 任一分支漏掉 <see cref="Ink_Canvas.Controls.IndependentCanvas.EndChromelessCapture"/>
+        /// 会让该画布永久停在无边框模式，漏掉标志则会让滚动同步对被永久禁用。
+        /// 幂等，可重复调用。
+        /// </para>
+        /// </summary>
+        private static void ResetUILinkageCaptureState(UILinkageCanvasInstance inst)
+        {
+            if (inst == null) return;
+
+            inst.IsCapturingLongScreenshot = false;
+            inst.CaptureStartedUtc = DateTime.MinValue;
+
+            try
+            {
+                inst.Canvas?.EndChromelessCapture();
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"UI联动长截屏状态复位失败: {ex.Message}", LogHelper.LogType.Warning);
             }
         }
 
@@ -2365,8 +2784,7 @@ namespace Ink_Canvas
                     bool shouldRemove = false;
                     await Dispatcher.InvokeAsync(() =>
                     {
-                        snap.Instance.IsCapturingLongScreenshot = false;
-                        canvas?.EndChromelessCapture();
+                        ResetUILinkageCaptureState(snap.Instance);
                         // 实例已解绑（解绑时为截图保留画布）→ 截图完成后移除控件。
                         shouldRemove = !_uiLinkageInstances.Contains(snap.Instance);
                         if (shouldRemove && canvas != null)
@@ -2693,10 +3111,15 @@ namespace Ink_Canvas
             return name;
         }
 
-        private static string GetUILinkageInkPath(string docName)
+        private static string GetUILinkageInkPath(string docName, string windowKeySuffix = "")
         {
-            return Path.Combine(App.RootPath, "UILinkageInk", SanitizeFileName(docName) + ".isf");
+            return Path.Combine(App.RootPath, "UILinkageInk",
+                SanitizeFileName(docName) + windowKeySuffix + ".isf");
         }
+
+        /// <summary>旧版（不带窗口后缀）的墨迹文件路径，读取时作为升级兜底。</summary>
+        private static string GetUILinkageLegacyInkPath(string docName)
+            => GetUILinkageInkPath(docName);
 
         private void SaveUILinkageInk(UILinkageCanvasInstance inst)
         {
@@ -2722,14 +3145,42 @@ namespace Ink_Canvas
                 foreach (Stroke stroke in contentAnchored)
                     stroke.Transform(bake, false);
 
-                var path = GetUILinkageInkPath(inst.DocName);
+                var path = GetUILinkageInkPath(inst.DocName, GetUILinkageWindowKeySuffix(inst));
                 Directory.CreateDirectory(Path.GetDirectoryName(path));
                 using (var fs = new FileStream(path, FileMode.Create, FileAccess.Write))
                     contentAnchored.Save(fs);
+
+                // 注意：这里刻意【不删除】旧版无后缀 / 旧版 HWND 键的文件。
+                // 历史实现对旧版无后缀文件做了「迁移后删除」，配合 HWND 后缀就变成了数据丢失：
+                // HWND 每次进程启动都变，下次运行既命中不了新键、旧文件又已被删掉。
+                // 现在键是稳定的，旧文件只是被取代，留着它既能让升级用户首次命中、
+                // 也能在键规则再次演进时继续兜底，代价只是磁盘上一个不再增长的旧文件。
             }
             catch (Exception ex)
             {
                 LogHelper.WriteLogToFile($"UI联动墨迹保存失败: {ex.Message}", LogHelper.LogType.Warning);
+            }
+        }
+
+        /// <summary>
+        /// 周期性保存所有已绑定独立画布的墨迹（由主画布的自动保存定时器驱动）。
+        /// 独立画布墨迹不在 <c>inkCanvas.Strokes</c> 里，主画布的自动保存覆盖不到它；
+        /// 不落盘的话，崩溃/被强杀时自上次解绑以来的批注会全部丢失。
+        /// 是否真正写盘仍由 <see cref="UILinkageSettings.AutoSaveInk"/> 决定。
+        /// </summary>
+        internal void SaveAllUILinkageInk()
+        {
+            if (_uiLinkageInstances.Count == 0) return;
+
+            var s = SettingsManager.Settings?.UILinkage;
+            if (s == null || !s.AutoSaveInk) return;
+
+            foreach (var inst in _uiLinkageInstances.ToList())
+            {
+                if (inst?.Canvas == null || !inst.Bound) continue;
+                if (inst.IsCapturingLongScreenshot) continue; // 截图期间坐标正被程序性驱动
+                if (inst.Canvas.Strokes.Count == 0) continue;
+                SaveUILinkageInk(inst);
             }
         }
 
@@ -2748,8 +3199,17 @@ namespace Ink_Canvas
 
             try
             {
-                var path = GetUILinkageInkPath(inst.DocName);
-                if (!File.Exists(path)) return;
+                var path = GetUILinkageInkPath(inst.DocName, GetUILinkageWindowKeySuffix(inst));
+                // 升级/恢复兜底（按优先级）：
+                //   1) 稳定键（文档名 + 窗口槽位）—— 正常路径；
+                //   2) 旧版无后缀（仅文档名）—— 老版本写下的文件；
+                //   3) 旧版 HWND 键（_h*）—— 短暂存在过的缺陷版本留下的孤儿文件。
+                // 三步都只读，不删；下一次保存会写到稳定键上。
+                if (!File.Exists(path))
+                    path = GetUILinkageLegacyInkPath(inst.DocName);
+                if (!File.Exists(path))
+                    path = TryFindOrphanedHwndKeyedPath(inst.DocName, ".isf");
+                if (string.IsNullOrEmpty(path) || !File.Exists(path)) return;
 
                 using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read))
                 {
@@ -2758,7 +3218,7 @@ namespace Ink_Canvas
                     // 记录载入笔迹与保存时缩放：首次读到当前缩放时按比例重缩放这批墨迹，
                     // 保证两次批注之间 Word 缩放变化过的情况下历史墨迹仍对齐文档内容。
                     inst.LoadedInkStrokes = loaded.ToList();
-                    inst.SavedZoomPercent = ReadUILinkageSavedZoomPercent(inst.DocName);
+                    inst.SavedZoomPercent = ReadUILinkageSavedZoomPercent(inst);
 
                     inst.Canvas.Strokes.Add(loaded);
                 }
@@ -2769,13 +3229,21 @@ namespace Ink_Canvas
             }
         }
 
-        /// <summary>读取按文档记忆的保存时缩放百分比（state json）。缺失/无效返回 NaN。</summary>
-        private static double ReadUILinkageSavedZoomPercent(string docName)
+        /// <summary>读取本实例记忆的保存时缩放百分比（state json）。缺失/无效返回 NaN。</summary>
+        private static double ReadUILinkageSavedZoomPercent(UILinkageCanvasInstance inst)
         {
             try
             {
-                var path = GetUILinkageStatePath(docName);
-                if (!File.Exists(path)) return double.NaN;
+                if (inst == null || string.IsNullOrWhiteSpace(inst.DocName)) return double.NaN;
+
+                var path = GetUILinkageStatePath(inst.DocName, GetUILinkageWindowKeySuffix(inst));
+                // 兜底顺序同 LoadUILinkageInk：稳定键 → 旧版无后缀 → 旧版 HWND 键孤儿文件。
+                if (!File.Exists(path))
+                    path = GetUILinkageLegacyStatePath(inst.DocName);
+                if (!File.Exists(path))
+                    path = TryFindOrphanedHwndKeyedPath(inst.DocName, ".state.json");
+                if (string.IsNullOrEmpty(path) || !File.Exists(path)) return double.NaN;
+
                 var state = JsonConvert.DeserializeObject<UILinkageScrollState>(File.ReadAllText(path));
                 return state?.ZoomPercent ?? double.NaN;
             }

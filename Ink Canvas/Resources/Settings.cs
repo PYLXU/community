@@ -76,6 +76,9 @@ namespace Ink_Canvas
 
         [JsonProperty("uiLinkage")]
         public UILinkageSettings UILinkage { get; set; } = new UILinkageSettings();
+
+        [JsonProperty("imageViewer")]
+        public ImageViewerSettings ImageViewer { get; set; } = new ImageViewerSettings();
     }
 
     public class PerformanceSettings
@@ -432,6 +435,20 @@ namespace Ink_Canvas
         /// <summary>实验性：启用 WinRT 系统墨迹管线（CoreInkIndependentInputSource + 系统 Wet Ink），关闭时回退 WPF 原生墨迹。</summary>
         [JsonProperty("useWinRTInk")]
         public bool UseWinRTInk { get; set; } = false;
+        /// <summary>
+        /// 原生湿墨迹管线（WM_POINTER + DirectComposition 直接合成）的开关语义为「默认启用」，
+        /// 因此这里用反向开关：置 true 时跳过原生管线、回退到旧 WPF 湿墨迹输入路径
+        /// （见 MW_NativeWetInk.TryStartNativeWetInkPipeline 的启动守卫）。
+        /// 默认 false = 使用原生管线；仅作为出现问题时的逃生阀，不暴露给普通用户。
+        /// </summary>
+        [JsonProperty("useLegacyWetInk")]
+        public bool UseLegacyWetInk { get; set; } = false;
+        /// <summary>
+        /// 原生湿墨迹是否启用指针预测（把系统 pointer prediction 的预测点并入在途笔迹）。
+        /// 关闭后笔迹更「跟手但略滞后」，用于低延迟优先或有预测抖动问题的设备。
+        /// </summary>
+        [JsonProperty("enableNativeInkPrediction")]
+        public bool EnableNativeInkPrediction { get; set; } = true;
         [JsonProperty("palmEraserSensitivity")]
         public int PalmEraserSensitivity { get; set; } = 0; // 0-低敏感度, 1-中敏感度, 2-高敏感度
         [JsonProperty("clearCanvasAlsoClearImages")]
@@ -1936,5 +1953,88 @@ namespace Ink_Canvas
         /// <summary>退出批注/解除绑定时，对带墨迹的区域自动长截屏（顶部/底部各延伸一块，间隔处分多图）。</summary>
         [JsonProperty("autoLongScreenshot")]
         public bool AutoLongScreenshot { get; set; } = false;
+    }
+
+    /// <summary>
+    /// 内置图片查看器（基于独立画布的扩展）。
+    /// <para>
+    /// 把常见图片格式「绑定」到本程序后，双击图片即以一块独立画布窗口打开：
+    /// 画布背景是图片本身（可缩放/旋转/平移），墨迹批注叠加在图片之上并随图片一起变换；
+    /// 窗口可拖动/调整大小/分屏吸附，每张图片一个窗口，任务栏各自有实时预览。
+    /// </para>
+    /// </summary>
+    public class ImageViewerSettings
+    {
+        /// <summary>内置图片查看器总开关。关闭时不接管任何图片格式。</summary>
+        [JsonProperty("isEnabled")]
+        public bool IsEnabled { get; set; } = false;
+
+        /// <summary>
+        /// 已绑定到内置图片查看器的扩展名（含点、小写、去重）。
+        /// 空列表表示尚未绑定任何格式；只有在此列表中的扩展名才会被本程序接管。
+        /// </summary>
+        [JsonProperty("boundExtensions")]
+        public List<string> BoundExtensions { get; set; } = new List<string>();
+
+        /// <summary>
+        /// 把已绑定的扩展名写入注册表（HKCU\Software\Classes），使其出现在资源管理器
+        /// 右键「打开方式」列表中，并把本程序登记为一个可选的图片应用。
+        /// </summary>
+        [JsonProperty("registerFileAssociation")]
+        public bool RegisterFileAssociation { get; set; } = true;
+
+        /// <summary>
+        /// 多实例：每张图片各自一个独立窗口（任务栏分别为每个窗口显示缩略图预览）。
+        /// 关闭时最多保留一个查看器窗口，后打开的图片复用该窗口。
+        /// </summary>
+        [JsonProperty("multiInstance")]
+        public bool MultiInstance { get; set; } = true;
+
+        /// <summary>在任务栏显示图标，最小化后可点击任务栏缩略图快速唤起。</summary>
+        [JsonProperty("showInTaskbar")]
+        public bool ShowInTaskbar { get; set; } = true;
+
+        /// <summary>
+        /// 拖动到屏幕边缘时吸附：顶部 → 最大化，左/右 → 半屏（左右分屏）。
+        /// 关闭后窗口仍不会超出屏幕范围。
+        /// </summary>
+        [JsonProperty("edgeSnap")]
+        public bool EdgeSnap { get; set; } = true;
+
+        /// <summary>图片之外的留白区域背景色（#AARRGGBB）。</summary>
+        [JsonProperty("backgroundColor")]
+        public string BackgroundColor { get; set; } = "#FF1E1E1E";
+
+        /// <summary>记住最后一次窗口位置与大小，下次打开图片时沿用。</summary>
+        [JsonProperty("rememberWindowPlacement")]
+        public bool RememberWindowPlacement { get; set; } = true;
+
+        /// <summary>上次窗口左边界（DIP）；null 表示尚未记录。</summary>
+        [JsonProperty("windowLeft")]
+        public double? WindowLeft { get; set; }
+
+        /// <summary>上次窗口上边界（DIP）；null 表示尚未记录。</summary>
+        [JsonProperty("windowTop")]
+        public double? WindowTop { get; set; }
+
+        /// <summary>上次窗口宽度（DIP）。</summary>
+        [JsonProperty("windowWidth")]
+        public double WindowWidth { get; set; } = 1180;
+
+        /// <summary>上次窗口高度（DIP）。</summary>
+        [JsonProperty("windowHeight")]
+        public double WindowHeight { get; set; } = 800;
+
+        /// <summary>打开图片时自动适应窗口（否则按 100% 原始大小显示）。</summary>
+        [JsonProperty("fitToWindowOnOpen")]
+        public bool FitToWindowOnOpen { get; set; } = true;
+
+        /// <summary>关闭查看器时把该图片上的批注保存到配置目录，下次打开同一图片自动恢复。</summary>
+        [JsonProperty("autoSaveInk")]
+        public bool AutoSaveInk { get; set; } = true;
+
+        /// <summary>「上一张/下一张」与「文件夹」按钮使用的最近一次浏览目录。</summary>
+        [JsonProperty("lastFolder")]
+        public string LastFolder { get; set; } = string.Empty;
     }
 }

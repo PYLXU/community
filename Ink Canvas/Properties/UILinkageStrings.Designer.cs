@@ -59,6 +59,14 @@ namespace Ink_Canvas.Properties
         public static string DebugToggle => ResourceManager.GetString(nameof(DebugToggle), _resourceCulture);
 
         public static string DebugToggleHint => ResourceManager.GetString(nameof(DebugToggleHint), _resourceCulture);
+
+        public static string DebugGrabToggle => ResourceManager.GetString(nameof(DebugGrabToggle), _resourceCulture);
+
+        public static string DebugGrabHint => ResourceManager.GetString(nameof(DebugGrabHint), _resourceCulture);
+
+        public static string DebugGrabStatus => ResourceManager.GetString(nameof(DebugGrabStatus), _resourceCulture);
+
+        public static string DebugNoCapture => ResourceManager.GetString(nameof(DebugNoCapture), _resourceCulture);
         public static string AutomationGroupHeader => ResourceManager.GetString(nameof(AutomationGroupHeader), _resourceCulture);
 
         public static string RememberScrollPosition => ResourceManager.GetString(nameof(RememberScrollPosition), _resourceCulture);

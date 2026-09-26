@@ -204,4 +204,22 @@
   <data name="Debug_SettingsExpanderExample_Desc" xml:space="preserve">
     <value>可以通过覆盖 SettingsCardLeftIndention 资源来调整 SettingsCard 的左缩进。</value>
   </data>
+  <data name="RealtimeInkFpsOverlay_IdleText" xml:space="preserve">
+    <value>实时笔迹（空闲）</value>
+  </data>
+  <data name="RealtimeInkFpsOverlay_ActiveText" xml:space="preserve">
+    <value>实时笔迹（帧数 {0}）</value>
+  </data>
+  <data name="RealtimeInkFpsOverlay_FpsText" xml:space="preserve">
+    <value>FPS  {0:F1}</value>
+  </data>
+  <data name="RealtimeInkFpsOverlay_NoValue" xml:space="preserve">
+    <value>--</value>
+  </data>
+  <data name="RealtimeInkFpsOverlay_SubmitText" xml:space="preserve">
+    <value>提交  {0:F1} ms / max {1:F1} ms</value>
+  </data>
+  <data name="RealtimeInkFpsOverlay_FrameAgeText" xml:space="preserve">
+    <value>帧龄  {0:F1} ms / max {1:F1} ms</value>
+  </data>
 </root>

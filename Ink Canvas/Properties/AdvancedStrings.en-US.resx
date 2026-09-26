@@ -225,4 +225,22 @@
   <data name="Debug_MemoryBreakdownForceGC_Button" xml:space="preserve">
     <value>Force GC</value>
   </data>
+  <data name="RealtimeInkFpsOverlay_IdleText" xml:space="preserve">
+    <value>Realtime ink (idle)</value>
+  </data>
+  <data name="RealtimeInkFpsOverlay_ActiveText" xml:space="preserve">
+    <value>Realtime ink (frames {0})</value>
+  </data>
+  <data name="RealtimeInkFpsOverlay_FpsText" xml:space="preserve">
+    <value>FPS  {0:F1}</value>
+  </data>
+  <data name="RealtimeInkFpsOverlay_NoValue" xml:space="preserve">
+    <value>--</value>
+  </data>
+  <data name="RealtimeInkFpsOverlay_SubmitText" xml:space="preserve">
+    <value>Submit  {0:F1} ms / max {1:F1} ms</value>
+  </data>
+  <data name="RealtimeInkFpsOverlay_FrameAgeText" xml:space="preserve">
+    <value>Frame age  {0:F1} ms / max {1:F1} ms</value>
+  </data>
 </root>

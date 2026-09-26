@@ -791,6 +791,9 @@ namespace Ink_Canvas
             // 注册橡皮擦操作结束事件
             inkCanvas.StylusUp += inkCanvas_StylusUp;
 
+            // 墨迹活动归属跟踪（Ctrl+Z 按「最近落笔的画布」分派，见 MW_InkActivity.cs）
+            InitInkActivityTracking();
+
             // 初始化第一页Canvas
             var firstCanvas = new System.Windows.Controls.Canvas();
             whiteboardPages.Add(firstCanvas);
@@ -1970,8 +1973,11 @@ namespace Ink_Canvas
             // 玻璃浮动栏刻意不设 Owner，必须显式关闭，否则残留窗口会挡住进程退出
             HideLiquidGlassBar();
 
-            // UI 联动：关闭前保存所有独立画布实例的墨迹与滚动位置（按文档名持久化）。
+            // UI 联动：先停止焦点窗口监听并卸载抓取鼠标钩子，再保存所有独立画布实例的墨迹与滚动位置。
             // 应用即将退出，长截屏无法完成，不在此触发。
+            try { DisposeUILinkageWatching(); }
+            catch (Exception ex) { LogHelper.WriteLogToFile($"UI联动监听释放失败: {ex.Message}", LogHelper.LogType.Warning); }
+
             try { UnbindAllUILinkageCanvases(captureLongScreenshot: false); }
             catch (Exception ex) { LogHelper.WriteLogToFile($"UI联动墨迹退出保存失败: {ex.Message}", LogHelper.LogType.Warning); }
 

@@ -343,6 +343,40 @@ namespace Ink_Canvas
             }
         }
 
+        /// <summary>
+        /// 收集「位置与尺寸」齐备的可见联动实例，供截图合成把其墨迹一并画上。
+        /// </summary>
+        private System.Collections.Generic.List<(
+            Ink_Canvas.Controls.IndependentCanvas Canvas, System.Windows.Point DipTopLeft)> GetUILinkageCaptureTargets()
+        {
+            var targets = new System.Collections.Generic.List<(
+                Ink_Canvas.Controls.IndependentCanvas Canvas, System.Windows.Point DipTopLeft)>();
+            if (_uiLinkageInstances == null || inkCanvas == null) return targets;
+
+            foreach (var inst in _uiLinkageInstances)
+            {
+                var canvas = inst?.Canvas;
+                if (canvas == null || !inst.Bound) continue;
+                if (canvas.Visibility != Visibility.Visible) continue;
+                if (canvas.Strokes == null || canvas.Strokes.Count == 0) continue;
+                if (canvas.ActualWidth <= 0 || canvas.ActualHeight <= 0) continue;
+
+                try
+                {
+                    // 独立画布与 inkCanvas 同处 InkCanvasGridForInkReplay，取它在主画布坐标系中的
+                    // 原点即可与 VisualBrush(inkCanvas) 的绘制原点对齐。
+                    var topLeft = canvas.TranslatePoint(new System.Windows.Point(0, 0), inkCanvas);
+                    targets.Add((canvas, topLeft));
+                }
+                catch
+                {
+                    // 变换暂时不可用（布局中/已脱离视觉树）：跳过该实例。
+                }
+            }
+
+            return targets;
+        }
+
         private BitmapSource CreateInkOverlayPreviewBitmapSource()
         {
             try
@@ -352,7 +386,9 @@ namespace Ink_Canvas
                     return null;
                 }
 
-                if ((inkCanvas.Strokes?.Count ?? 0) == 0 && inkCanvas.Children.Count == 0)
+                var linkageTargets = GetUILinkageCaptureTargets();
+                if ((inkCanvas.Strokes?.Count ?? 0) == 0 && inkCanvas.Children.Count == 0
+                    && linkageTargets.Count == 0)
                 {
                     return null;
                 }
@@ -383,6 +419,34 @@ namespace Ink_Canvas
                         Stretch = Stretch.Fill
                     };
                     dc.DrawRectangle(visualBrush, null, new Rect(offsetX, offsetY, widthPx, heightPx));
+
+                    // 联动画布是 inkCanvas 的「兄弟」节点（同处 InkCanvasGridForInkReplay），
+                    // 不在 inkCanvas 的视觉子树里，上面的 VisualBrush 抓不到它 —— 不在这里补画，
+                    // 「插入截图 / 另存为图片」就会丢掉 Word 上的全部批注。
+                    // 直接 DrawDrawing 各笔迹，不改动画布视觉与滚动动画状态。
+                    foreach (var (canvas, dipTopLeft) in linkageTargets)
+                    {
+                        var canvasOriginPx = transformToDevice.Transform(dipTopLeft);
+                        dc.PushTransform(new TranslateTransform(
+                            offsetX + canvasOriginPx.X, offsetY + canvasOriginPx.Y));
+                        try
+                        {
+                            // 笔迹数据坐标 d 相对视口又偏移了 -S（滚动同步用 Transform 实现），
+                            // 故先平移 +S 回到视口坐标，再叠加画布原点。
+                            var scroll = canvas.AppliedScrollOffset;
+                            dc.PushTransform(new TranslateTransform(scroll.X, scroll.Y));
+                            foreach (System.Windows.Ink.Stroke stroke in canvas.Strokes)
+                            {
+                                try { stroke.Draw(dc); }
+                                catch { /* 单笔绘制失败不影响其余批注 */ }
+                            }
+                            dc.Pop();
+                        }
+                        finally
+                        {
+                            dc.Pop();
+                        }
+                    }
                 }
 
                 var rtb = new RenderTargetBitmap(

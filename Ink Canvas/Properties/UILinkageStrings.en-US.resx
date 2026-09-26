@@ -52,7 +52,7 @@
     <value>Enable UI integration</value>
   </data>
   <data name="MasterToggleHint" xml:space="preserve">
-    <value>When enabled, writing in annotation mode locates the document viewport of the underlying app and creates a linked canvas (currently supports Word and SumatraPDF)</value>
+    <value>When enabled, the focused window is detected in real time: as soon as a document viewport is found, a linked canvas is created and follows document scrolling and zoom (currently supports Word and SumatraPDF)</value>
   </data>
   <data name="Word" xml:space="preserve">
     <value>Microsoft Word</value>
@@ -65,6 +65,24 @@
   </data>
   <data name="SumatraPdfHint" xml:space="preserve">
     <value>Track the document rendering area and link annotation ink while writing in SumatraPDF (supports scroll following and auto long screenshots)</value>
+  </data>
+  <data name="DebugToggle" xml:space="preserve">
+    <value>Debug panel</value>
+  </data>
+  <data name="DebugToggleHint" xml:space="preserve">
+    <value>Show the UI integration debug panel on the canvas layer: enable "Grab element with mouse" and click a target element to sample its UIA information (no need to write first)</value>
+  </data>
+  <data name="DebugGrabToggle" xml:space="preserve">
+    <value>Grab element with mouse</value>
+  </data>
+  <data name="DebugGrabHint" xml:space="preserve">
+    <value>Grabbing: click a target element to sample its UIA (the click is not passed to the target app, and this app's own windows are excluded). Right-click or uncheck to exit</value>
+  </data>
+  <data name="DebugGrabStatus" xml:space="preserve">
+    <value>[Mouse grab] Active - click a target element to sample, right-click to exit</value>
+  </data>
+  <data name="DebugNoCapture" xml:space="preserve">
+    <value>(No element captured yet: enable "Grab element with mouse" and click a target element to sample)</value>
   </data>
   <data name="AutomationGroupHeader" xml:space="preserve">
     <value>Automation</value>

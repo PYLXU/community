@@ -10,12 +10,22 @@ namespace Ink_Canvas.Helpers
     /// 同时提供被遮挡区域计算：枚举 Z 序上位于目标窗口之上的窗口并求交。
     /// 判定「可见」时剔除：不可见、最小化、DWM Cloaked、全透明分层窗口（alpha=0）
     /// 以及点击穿透窗口（WS_EX_TRANSPARENT，仅用于后方窗口查找——点击会落到其下方）。
-    /// 自包含 P/Invoke，仅在 UI 联动调试捕捉组件时使用。
+    /// 自包含 P/Invoke，供 UI 联动实时识别（前台窗口）与调试捕捉组件使用。
     /// </summary>
     internal static class UILinkageWindowFinder
     {
         [DllImport("user32.dll")]
         private static extern IntPtr WindowFromPoint(POINT point);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetCursorPos(out POINT lpPoint);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "GetClassNameW")]
+        private static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder lpClassName, int nMaxCount);
 
         [DllImport("user32.dll")]
         private static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
@@ -269,6 +279,102 @@ namespace Ink_Canvas.Helpers
             if (hwnd == IntPtr.Zero) return false;
             try { return IsWindow(hwnd); }
             catch { return false; }
+        }
+
+        /// <summary>当前前台（焦点）窗口句柄；读取失败返回 <see cref="IntPtr.Zero"/>。</summary>
+        public static IntPtr GetForegroundWindowHandle()
+        {
+            try { return GetForegroundWindow(); }
+            catch { return IntPtr.Zero; }
+        }
+
+        /// <summary>读取窗口所属进程 ID；读取失败返回 0。</summary>
+        public static uint GetWindowProcessId(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero) return 0;
+            try
+            {
+                GetWindowThreadProcessId(hwnd, out uint pid);
+                return pid;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        /// <summary>读取鼠标当前位置（屏幕物理像素）；读取失败返回 false。</summary>
+        public static bool TryGetCursorPosition(out int screenX, out int screenY)
+        {
+            screenX = 0;
+            screenY = 0;
+            try
+            {
+                if (!GetCursorPos(out var pt)) return false;
+                screenX = pt.X;
+                screenY = pt.Y;
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 读取窗口类名（用于识别目标应用主窗口，排除其对话框/子窗口）；读取失败返回空串。
+        /// </summary>
+        public static string GetWindowClassName(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero) return string.Empty;
+            try
+            {
+                var buffer = new System.Text.StringBuilder(256);
+                int length = GetClassName(hwnd, buffer, buffer.Capacity);
+                return length > 0 ? buffer.ToString() : string.Empty;
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        /// <summary>
+        /// 查找覆盖给定屏幕点、且属于自身进程的「其它」窗口（排除 <paramref name="excludeHwnd"/>，
+        /// 即主窗口自身）。用于鼠标抓取模式下判定点击是否落在自身弹出面板/浮动栏/设置窗口上，
+        /// 保证抓取期间仍能操作本应用界面。点击穿透窗口（WS_EX_TRANSPARENT）视为不接收点击，不计入。
+        /// 找不到返回 <see cref="IntPtr.Zero"/>。
+        /// </summary>
+        public static IntPtr FindOwnProcessWindowOverPoint(int screenX, int screenY, IntPtr excludeHwnd)
+        {
+            if (excludeHwnd == IntPtr.Zero) return IntPtr.Zero;
+
+            try
+            {
+                uint selfPid = GetWindowProcessId(excludeHwnd);
+                if (selfPid == 0) return IntPtr.Zero;
+
+                var pt = new POINT { X = screenX, Y = screenY };
+                IntPtr hwnd = WindowFromPoint(pt);
+
+                int guard = 0;
+                while (hwnd != IntPtr.Zero && guard++ < 128)
+                {
+                    if (hwnd != excludeHwnd
+                        && GetWindowProcessId(hwnd) == selfPid
+                        && IsWindowEffectivelyVisible(hwnd, treatClickThroughAsInvisible: true)
+                        && IsPointInWindow(hwnd, screenX, screenY))
+                        return hwnd;
+
+                    hwnd = GetWindow(hwnd, GW_HWNDNEXT);
+                }
+            }
+            catch
+            {
+                // 忽略异常，返回 Zero 表示该点不在自身其它窗口上。
+            }
+
+            return IntPtr.Zero;
         }
     }
 }

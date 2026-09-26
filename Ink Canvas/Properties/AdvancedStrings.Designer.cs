@@ -166,5 +166,20 @@ namespace Ink_Canvas.Properties
         public static string Debug_MemoryBreakdownForceGC_Desc => ResourceManager.GetString(nameof(Debug_MemoryBreakdownForceGC_Desc), _resourceCulture);
 
         public static string Debug_MemoryBreakdownForceGC_Button => ResourceManager.GetString(nameof(Debug_MemoryBreakdownForceGC_Button), _resourceCulture);
+
+        // Hand-added for the realtime-ink FPS overlay (Helpers/RealtimeInkFpsOverlay.cs).
+        // Same rationale as the block above: the generator reproduces these identically on its
+        // next explicit run; until then this is the only way the compiler sees the keys.
+        public static string RealtimeInkFpsOverlay_IdleText => ResourceManager.GetString(nameof(RealtimeInkFpsOverlay_IdleText), _resourceCulture);
+
+        public static string RealtimeInkFpsOverlay_ActiveText => ResourceManager.GetString(nameof(RealtimeInkFpsOverlay_ActiveText), _resourceCulture);
+
+        public static string RealtimeInkFpsOverlay_FpsText => ResourceManager.GetString(nameof(RealtimeInkFpsOverlay_FpsText), _resourceCulture);
+
+        public static string RealtimeInkFpsOverlay_NoValue => ResourceManager.GetString(nameof(RealtimeInkFpsOverlay_NoValue), _resourceCulture);
+
+        public static string RealtimeInkFpsOverlay_SubmitText => ResourceManager.GetString(nameof(RealtimeInkFpsOverlay_SubmitText), _resourceCulture);
+
+        public static string RealtimeInkFpsOverlay_FrameAgeText => ResourceManager.GetString(nameof(RealtimeInkFpsOverlay_FrameAgeText), _resourceCulture);
     }
 }

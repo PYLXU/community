@@ -2,6 +2,24 @@ using System;
 
 namespace Ink_Canvas.Ink
 {
+    /// <summary>
+    /// 手掌接触判定委托：给定接触面宽高，判断是否应按手掌擦处理，并给出擦头宽度。
+    /// <para>
+    /// 这是 <see cref="Ink_Canvas.Controls.IndependentCanvas"/> 与宿主之间的公开契约。
+    /// 之所以用「宽高 in、宽度 out」这种原始类型签名，而不是直接暴露
+    /// <see cref="PalmEraserPolicy"/>：委托的返回/参数类型可访问性必须不低于委托本身
+    /// （否则 CS0058/CS0053），而策略结构体刻意保持 internal —— 它包含
+    /// <c>IsQuadIr</c>、<c>TouchMultiplier</c> 等设备相关旋钮，不应成为公开 API 的一部分。
+    /// 因此由宿主在 internal 侧完成策略构造与判定，公开侧只看到原始类型。
+    /// </para>
+    /// </summary>
+    /// <param name="contactWidthDip">接触面宽度（DIP）。</param>
+    /// <param name="contactHeightDip">接触面高度（DIP）。</param>
+    /// <param name="eraserWidthDip">判定为手掌擦时输出的擦头宽度（DIP）。</param>
+    /// <returns>true 表示该接触应按手掌擦处理。</returns>
+    public delegate bool PalmContactClassifier(
+        double contactWidthDip, double contactHeightDip, out double eraserWidthDip);
+
     internal static class EraserSizeCalculator
     {
         private const double BaseEraserSizeDip = 90;

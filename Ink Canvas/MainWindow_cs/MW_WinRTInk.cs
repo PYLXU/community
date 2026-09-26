@@ -1034,42 +1034,10 @@ namespace Ink_Canvas
                 inkCanvas.EditingMode = InkCanvasEditingMode.None;
         }
 
-        private LogicalInkTool ResolveLogicalInkTool()
-        {
-            if (IsBoardRoamingMode)
-                return LogicalInkTool.BoardRoam;
-            if (drawingShapeMode != 0
-                || string.Equals(_currentToolMode, "shape", StringComparison.OrdinalIgnoreCase))
-                return LogicalInkTool.Shape;
-
-            switch (_currentToolMode)
-            {
-                case "pen":
-                case "color":
-                    return LogicalInkTool.Pen;
-                case "eraser":
-                    return LogicalInkTool.PointEraser;
-                case "eraserByStrokes":
-                    return LogicalInkTool.StrokeEraser;
-                case "select":
-                    return LogicalInkTool.Select;
-                case "roaming":
-                    return LogicalInkTool.BoardRoam;
-                case "cursor":
-                default:
-                    return LogicalInkTool.Cursor;
-            }
-        }
-
-        private bool ResolveTwoFingerGestureAllowed()
-        {
-            if (_pluginCanvasGestureHandler != null)
-                return true;
-            if (IsInPPTPresentationMode)
-                return Settings.PowerPointSettings.IsEnableTwoFingerGestureInPresentationMode
-                       && Settings.Gesture.IsEnableTwoFingerGesture;
-            return Settings.Gesture.IsEnableTwoFingerGesture;
-        }
+        // NOTE: ResolveLogicalInkTool / ResolveTwoFingerGestureAllowed / NativeWin32Point /
+        // WindowFromPoint / IsUiChromeHit / IsUnderNamed 均由新的原生湿墨迹管线提供
+        // （MW_NativeWetInk.cs）。二者是等价实现，曾同时存在导致 CS0102/CS0111 重复定义，
+        // 现统一保留新文件中的一份，本文件直接复用（禁止在此重新定义）。
 
         private bool IsCanvasPoint(int screenX, int screenY)
         {
@@ -1167,8 +1135,7 @@ namespace Ink_Canvas
                     && (IsUnderNamed(hit, "EraserOverlayCanvas")
                         || IsUnderElement(hit, EraserOverlayCanvas)))
                 {
-                    detail += " [eraser-overlay]";
-                    return CanvasHitZone.EraserOverlay;
+                    detail += " [eraser-overlay]";                    return CanvasHitZone.EraserOverlay;
                 }
 
                 if (hit != null)
@@ -1410,93 +1377,10 @@ namespace Ink_Canvas
             public int Bottom;
         }
 
-        [StructLayout(LayoutKind.Sequential)]
-        private struct NativeWin32Point
-        {
-            public NativeWin32Point(int x, int y)
-            {
-                X = x;
-                Y = y;
-            }
-
-            public int X;
-            public int Y;
-        }
-
-        [DllImport("user32.dll")]
-        private static extern IntPtr WindowFromPoint(NativeWin32Point point);
-
-        private bool IsUiChromeHit(DependencyObject hit)
-        {
-            if (hit == null)
-                return false;
-
-            if (IsUnderNamed(hit, "ViewboxFloatingBar")
-                || IsUnderNamed(hit, "ViewboxBlackboardLeftSide")
-                || IsUnderNamed(hit, "ViewboxBlackboardCenterSide")
-                || IsUnderNamed(hit, "ViewboxBlackboardRightSide")
-                || IsUnderNamed(hit, "BlackboardLeftSide")
-                || IsUnderNamed(hit, "BlackboardCenterSide")
-                || IsUnderNamed(hit, "BlackboardRightSide")
-                || IsUnderNamed(hit, "BorderInkReplayToolBox")
-                || IsUnderNamed(hit, "IdleMiniBar")
-                || IsUnderNamed(hit, "EdgeExpandHint")
-                || IsUnderNamed(hit, "PPTControlsGrid")
-                || IsUnderNamed(hit, "GridPPTControlLeft")
-                || IsUnderNamed(hit, "GridPPTControlRight")
-                || IsUnderNamed(hit, "LeftBottomPanelForPPTNavigation")
-                || IsUnderNamed(hit, "RightBottomPanelForPPTNavigation")
-                || IsUnderNamed(hit, "LeftSidePanelForPPTNavigation")
-                || IsUnderNamed(hit, "RightSidePanelForPPTNavigation")
-                || IsUnderNamed(hit, "PPTQuickPanelContainer"))
-            {
-                return true;
-            }
-
-            var current = hit;
-            while (current != null)
-            {
-                if (current is Button
-                    || current is Thumb
-                    || current is Slider
-                    || current is ToggleButton
-                    || current is ScrollBar)
-                {
-                    return true;
-                }
-
-                current = VisualTreeHelper.GetParent(current)
-                          ?? (current as FrameworkElement)?.Parent;
-            }
-
-            return false;
-        }
-
-        private static bool IsUnderNamed(DependencyObject hit, string name)
-        {
-            var current = hit;
-            while (current != null)
-            {
-                if (current is FrameworkElement fe && string.Equals(fe.Name, name, StringComparison.Ordinal))
-                    return true;
-                current = VisualTreeHelper.GetParent(current)
-                          ?? (current as FrameworkElement)?.Parent;
-            }
-            return false;
-        }
-
-        private static bool IsUnderElement(DependencyObject hit, FrameworkElement element)
-        {
-            var current = hit;
-            while (current != null)
-            {
-                if (ReferenceEquals(current, element))
-                    return true;
-                current = VisualTreeHelper.GetParent(current)
-                          ?? (current as FrameworkElement)?.Parent;
-            }
-            return false;
-        }
+        // NativeWin32Point / WindowFromPoint 由 MW_NativeWetInk.cs 提供（见上方 NOTE）。
+        // 说明：此处原为 NativeWin32Point/WindowFromPoint/IsUiChromeHit/IsUnderNamed/
+        // IsUnderElement 的旧副本，已删除。删除时必须只摘除这些成员本身、保留紧随其后的
+        // GetWinRTDpiScales —— 它曾被误伤删掉方法头，这里按原签名恢复。
 
         private (double X, double Y) GetWinRTDpiScales()
         {

@@ -260,14 +260,32 @@ namespace Ink_Canvas
                     hitTester.AddPoint(pt);
                 }
 
-                // 独立画布面积擦：首次移动按点位解析实例（多实例），后续换算到其本地坐标。
-                if (uiLinkageHitTester == null
-                    && _uiLinkageEraserShape != null
-                    && TryResolveUILinkageEraseInstance(pt, out var resolved))
+                // 独立画布面积擦：按「当前点位」解析实例（支持多实例与跨窗口拖动）。
+                //
+                // 历史缺陷：这里只在 uiLinkageHitTester == null 时解析一次，之后整个拖拽都
+                // 继续喂给同一个实例（见 TryGetUILinkageLocalPoint 的带实例重载不做包含性
+                // 判断）。后果是「拖回白板仍在擦 Word 批注」，多实例重叠时还会擦到错误文档。
+                // 现在每个移动点都重新解析：点位落在别的实例上就切换命中测试器，
+                // 完全不在任何实例内（拖回白板 / 目标窗口被移走）就结束测试器、停止擦除。
+                UILinkageCanvasInstance resolved = null;
+                var hitAny = _uiLinkageEraserShape != null
+                             && TryResolveUILinkageEraseInstance(pt, out resolved);
+
+                if (!hitAny)
                 {
+                    EndUILinkageEraseHitTesting();
+                }
+                else if (!ReferenceEquals(resolved, _uiLinkageEraseInstance))
+                {
+                    // 切换实例：旧的命中测试器必须先收尾，否则它的 StrokeHit 回调会继续
+                    // 依据 _uiLinkageEraseInstance 去改另一个画布的墨迹。
+                    EndUILinkageEraseHitTesting();
+
                     _uiLinkageEraseInstance = resolved;
                     uiLinkageHitTester = resolved.Canvas.Strokes.GetIncrementalStrokeHitTester(_uiLinkageEraserShape);
                     uiLinkageHitTester.StrokeHit += UILinkageEraser_StrokeHit;
+                    // 墨迹活动归属：用户在独立画布上擦除，等同于在这块画布上操作。
+                    NoteUILinkageCanvasActivity();
                 }
 
                 if (uiLinkageHitTester != null
@@ -278,17 +296,45 @@ namespace Ink_Canvas
             }
         }
 
+        /// <summary>
+        /// 结束独立画布的面积擦命中测试并解除实例绑定（幂等）。
+        /// 用于三种时机：拖出独立画布视口、切换作用实例、橡皮擦抬笔/切工具。
+        /// 必须同时清 <see cref="_uiLinkageEraseInstance"/>，否则残留的实例引用会让后续
+        /// <see cref="UILinkageEraser_StrokeHit"/> 继续改动画布墨迹。
+        /// </summary>
+        private void EndUILinkageEraseHitTesting()
+        {
+            if (uiLinkageHitTester != null)
+            {
+                try { uiLinkageHitTester.EndHitTesting(); }
+                catch (Exception ex)
+                {
+                    LogHelper.WriteLogToFile($"独立画布橡皮擦命中测试收尾失败: {ex.Message}", LogHelper.LogType.Warning);
+                }
+                uiLinkageHitTester.StrokeHit -= UILinkageEraser_StrokeHit;
+                uiLinkageHitTester = null;
+            }
+
+            _uiLinkageEraseInstance = null;
+        }
+
         /// <summary>笔画橡皮擦（线擦）在独立画布上擦除命中的墨迹（按点位解析多实例）。</summary>
         private void EraseUILinkageStrokeAt(Point pt)
         {
             if (!TryResolveUILinkageEraseInstance(pt, out var inst) || inst?.Canvas == null) return;
+            // 与面积擦一致：点位必须真的落在该实例视口内（TryGetUILinkageInstanceAt 已判定），
+            // 且换算后的数据坐标才用于命中测试。
             if (!TryGetUILinkageLocalPoint(pt, inst, out var local)) return;
 
             var hits = inst.Canvas.Strokes.HitTest(local)
                 .Where(stroke => !stroke.ContainsPropertyData(FrozenStrokePropertyGuid))
                 .ToArray();
             if (hits.Length > 0)
+            {
                 inst.Canvas.Strokes.Remove(new StrokeCollection(hits));
+                // 墨迹活动归属：线擦作用于独立画布。
+                NoteUILinkageCanvasActivity();
+            }
         }
 
         /// <summary>独立画布面积擦的命中回调：与主画布几何擦除一致，仅作用于当前实例 Strokes。</summary>

@@ -1586,7 +1586,22 @@
                               VerticalAlignment="Center"
                               Checked="UILinkageShowTree_Changed"
                               Unchecked="UILinkageShowTree_Changed"/>
+                    <!-- 鼠标抓取元素：开启后单击目标元素即用 UIA 采集（自动排除本应用窗口）。 -->
+                    <CheckBox x:Name="UILinkageGrabElementCheck"
+                              Content="{x:Static props:UILinkageStrings.DebugGrabToggle}"
+                              Foreground="White"
+                              VerticalAlignment="Center"
+                              Margin="16,0,0,0"
+                              Checked="UILinkageGrabElement_Changed"
+                              Unchecked="UILinkageGrabElement_Changed"/>
                 </StackPanel>
+                <TextBlock x:Name="UILinkageGrabHintText"
+                           Text="{x:Static props:UILinkageStrings.DebugGrabHint}"
+                           FontSize="11"
+                           Foreground="#B0FFFFFF"
+                           TextWrapping="Wrap"
+                           Margin="0,0,0,8"
+                           Visibility="Collapsed"/>
                 <ScrollViewer MaxHeight="340" VerticalScrollBarVisibility="Auto">
                     <TextBlock x:Name="UILinkageDebugHudText"
                                FontFamily="Consolas"

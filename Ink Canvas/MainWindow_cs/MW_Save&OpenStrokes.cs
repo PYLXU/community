@@ -1196,6 +1196,36 @@ namespace Ink_Canvas
                         var visualBrush = new VisualBrush(inkCanvas);
                         // 绘制矩形并填充为inkCanvas的内容
                         dc.DrawRectangle(visualBrush, null, new Rect(0, 0, inkCanvas.ActualWidth, inkCanvas.ActualHeight));
+
+                        // UI 联动：独立画布是 inkCanvas 的「兄弟」节点（同处
+                        // InkCanvasGridForInkReplay），不在 inkCanvas 的视觉子树里，
+                        // 上面的 VisualBrush 抓不到它 —— 不在这里补画，「另存为图片」就会
+                        // 丢掉 Word 上的全部批注（而插入截图那条链路已经在 MW_ImageInsert
+                        // 里补画了，两条导出路径必须一致）。换算口径与 MW_ImageInsert
+                        // 的 CreateInkOverlayPreviewBitmapSource 完全相同：
+                        //   数据坐标 d 相对视口偏移了 -S（滚动同步用 Transform 实现），
+                        //   故先平移 +S 回到视口坐标，再叠加画布在 inkCanvas 坐标系中的原点。
+                        foreach (var (linkageCanvas, dipTopLeft) in GetUILinkageCaptureTargets())
+                        {
+                            // 用全限定名：本文件同时 using System.Drawing 与 System.Windows.Media，
+                            // 二者都有 TranslateTransform。
+                            dc.PushTransform(new System.Windows.Media.TranslateTransform(dipTopLeft.X, dipTopLeft.Y));
+                            try
+                            {
+                                var scroll = linkageCanvas.AppliedScrollOffset;
+                                dc.PushTransform(new System.Windows.Media.TranslateTransform(scroll.X, scroll.Y));
+                                foreach (System.Windows.Ink.Stroke stroke in linkageCanvas.Strokes)
+                                {
+                                    try { stroke.Draw(dc); }
+                                    catch { /* 单笔绘制失败不影响其余批注 */ }
+                                }
+                                dc.Pop();
+                            }
+                            finally
+                            {
+                                dc.Pop();
+                            }
+                        }
                     }
 
                     // 创建适合墨迹画布尺寸的渲染位图

@@ -1,4 +1,4 @@
-﻿using Newtonsoft.Json;
+using Newtonsoft.Json;
 using NHotkey.Wpf;
 using System;
 using System.Collections.Generic;
@@ -357,8 +357,8 @@ namespace Ink_Canvas.Helpers
                 // 开始注册默认快捷键集合
 
                 // 基本操作快捷键
-                RegisterHotkey("Undo", Key.Z, ModifierKeys.Control, () => _mainWindow.SymbolIconUndo_MouseUp(null, null));
-                RegisterHotkey("Redo", Key.Y, ModifierKeys.Control, () => _mainWindow.SymbolIconRedo_MouseUp(null, null));
+                RegisterHotkey("Undo", Key.Z, ModifierKeys.Control, () => _mainWindow.SymbolIconUndo_MouseUp(null, null, fromHotkey: true));
+                RegisterHotkey("Redo", Key.Y, ModifierKeys.Control, () => _mainWindow.SymbolIconRedo_MouseUp(null, null, fromHotkey: true));
                 RegisterHotkey("Clear", Key.E, ModifierKeys.Control, () => _mainWindow.SymbolIconDelete_MouseUp(null, null));
                 RegisterHotkey("Paste", Key.V, ModifierKeys.Control, () => _mainWindow.HandleGlobalPaste(null, null));
 
@@ -1361,9 +1361,9 @@ namespace Ink_Canvas.Helpers
                 switch (hotkeyName)
                 {
                     case "Undo":
-                        return () => _mainWindow.SymbolIconUndo_MouseUp(null, null);
+                        return () => _mainWindow.SymbolIconUndo_MouseUp(null, null, fromHotkey: true);
                     case "Redo":
-                        return () => _mainWindow.SymbolIconRedo_MouseUp(null, null);
+                        return () => _mainWindow.SymbolIconRedo_MouseUp(null, null, fromHotkey: true);
                     case "Clear":
                         return () => _mainWindow.SymbolIconDelete_MouseUp(null, null);
                     case "Paste":

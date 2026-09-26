@@ -1855,6 +1855,17 @@ namespace Ink_Canvas
         }
 
         private PalmEraserPolicy BuildPalmEraserPolicy()
+            => BuildPalmEraserPolicy(isPalmEraserActive);
+
+        /// <summary>
+        /// 构造手掌擦策略。<paramref name="isActive"/> 必须是「将要应用该策略的那块画布」
+        /// 自己的手掌擦状态：主画布传 <c>isPalmEraserActive</c>，UI 联动独立画布传
+        /// <c>IndependentCanvas.IsPalmErasing</c>。策略里的 <c>IsActive</c> 会让
+        /// <see cref="PalmEraserCalculator"/> 走「已在擦除中」分支（不再重复返回
+        /// <c>ActivatesEraser</c>），用错状态会让第二次落掌被误判成首次激活。
+        /// 其余阈值/灵敏度/擦头尺寸全部来自同一份设置，两块画布口径一致。
+        /// </summary>
+        private PalmEraserPolicy BuildPalmEraserPolicy(bool isActive)
         {
             var canvas = Settings.Canvas;
             var advanced = Settings.Advanced;
@@ -1862,7 +1873,7 @@ namespace Ink_Canvas
 
             return new PalmEraserPolicy(
                 enabled: canvas.EnablePalmEraser,
-                isActive: isPalmEraserActive,
+                isActive: isActive,
                 isQuadIr: advanced.IsQuadIR,
                 isSpecialScreen: advanced.IsSpecialScreen,
                 boundsWidthDip: BoundsWidth,

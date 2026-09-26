@@ -328,6 +328,43 @@ namespace Ink_Canvas.Helpers
             }
         }
 
+        /// <summary>
+        /// 由原生湿墨迹渲染线程驱动的 Live 状态刷新（见 WetInkWindowHost 的 Apply 路径）。
+        /// <para>
+        /// 抬笔才刷新（<see cref="FlushAfterEndStroke"/>）对原生管线不够：原生笔迹在抬笔前的
+        /// 每一帧都可能暴露卡顿，用户需要边写边看到 nativeWetInk 指标。因此这里提供按帧节流的
+        /// 刷新入口，未开启详细日志时为纯读取一个 volatile bool 的空操作，可安全放在热路径上。
+        /// </para>
+        /// <para>
+        /// 写文件在渲染线程上可能阻塞，故按 <see cref="LiveStatusMinIntervalMs"/> 节流；
+        /// 任何异常都只写 Debug，绝不向渲染路径抛出。
+        /// </para>
+        /// </summary>
+        public static void TickLiveStatus()
+        {
+            if (!_isDebugLoggingEnabled)
+                return;
+
+            var now = DateTime.UtcNow;
+            if ((now - _lastLiveStatusTickUtc).TotalMilliseconds < LiveStatusMinIntervalMs)
+                return;
+            _lastLiveStatusTickUtc = now;
+
+            try
+            {
+                WriteLiveStatus(GetSnapshot(), isActive: true);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"RealtimeInkPerformanceMonitor.TickLiveStatus: {ex.Message}");
+            }
+        }
+
+        /// <summary>Live 状态文件的最小写入间隔（毫秒），避免渲染线程被高频文件写入拖慢。</summary>
+        private const double LiveStatusMinIntervalMs = 200;
+
+        private static DateTime _lastLiveStatusTickUtc = DateTime.MinValue;
+
         private static PerformanceRunRecord BuildRecord(RealtimeInkPerformanceSnapshot snapshot, bool finalize)
         {
             var started = _sessionStart == DateTime.MinValue ? DateTime.Now : _sessionStart;
@@ -452,9 +489,46 @@ namespace Ink_Canvas.Helpers
                 frameWaitSampleCount = snapshot?.FrameWaitSampleCount ?? 0,
                 slowRedrawOver5MsCount = snapshot?.SlowRedrawOver5MsCount ?? 0,
                 byInputKind = snapshot?.ByInputKind,
+                // 原生湿墨迹（WM_POINTER + DirectComposition）的分桶指标。由 WetInkWindowHost
+                // 的渲染/输入路径经 NativeInkPerfProbe 采集，与上面的 WPF 实时笔迹指标并列，
+                // 便于在同一份 Live JSON 里对比两条输入管线。
+                nativeWetInk = BuildNativeWetInkLiveStatus(),
                 historyPath = GetHistoryPath()
             };
             File.WriteAllText(path, JsonConvert.SerializeObject(payload, CompactJsonSettings));
+        }
+
+        /// <summary>原生湿墨迹探针的 Live 快照（读失败时返回 null，不影响 WPF 侧指标写入）。</summary>
+        private static object BuildNativeWetInkLiveStatus()
+        {
+            try
+            {
+                return new
+                {
+                    applyFrameCount = Ink_Canvas.Ink.Native.NativeInkPerfProbe.ApplyFrameCount,
+                    averageApplyMs = Math.Round(Ink_Canvas.Ink.Native.NativeInkPerfProbe.AverageApplyMs, 3),
+                    lastApplyMs = Math.Round(Ink_Canvas.Ink.Native.NativeInkPerfProbe.LastApplyMs, 3),
+                    lastStrokeCommitMs = Math.Round(Ink_Canvas.Ink.Native.NativeInkPerfProbe.LastStrokeCommitMs, 3),
+                    averageSamplePerFrame = Math.Round(Ink_Canvas.Ink.Native.NativeInkPerfProbe.AverageSamplePerFrame, 2),
+                    beginStrokeCount = Ink_Canvas.Ink.Native.NativeInkPerfProbe.BeginStrokeCount,
+                    endStrokeCount = Ink_Canvas.Ink.Native.NativeInkPerfProbe.EndStrokeCount,
+                    cancelStrokeCount = Ink_Canvas.Ink.Native.NativeInkPerfProbe.CancelStrokeCount,
+                    maxUpdateTotalMs = Math.Round(Ink_Canvas.Ink.Native.NativeInkPerfProbe.MaxUpdateTotalMs, 3),
+                    lastUpdateTotalMs = Math.Round(Ink_Canvas.Ink.Native.NativeInkPerfProbe.LastUpdateTotalMs, 3),
+                    updateCount = Ink_Canvas.Ink.Native.NativeInkPerfProbe.UpdateCount,
+                    maxDispatcherDelayMs = Math.Round(Ink_Canvas.Ink.Native.NativeInkPerfProbe.MaxDispatcherDelayMs, 3),
+                    slowOpCount = Ink_Canvas.Ink.Native.NativeInkPerfProbe.SlowOpCount,
+                    slowOpOver20Ms = Ink_Canvas.Ink.Native.NativeInkPerfProbe.SlowOpOver20Ms,
+                    pointerHistoryEventCount = Ink_Canvas.Ink.Native.NativeInkPerfProbe.PointerHistoryEventCount,
+                    pointerHistoryTruncatedCount = Ink_Canvas.Ink.Native.NativeInkPerfProbe.PointerHistoryTruncatedCount,
+                    perKind = Ink_Canvas.Ink.Native.NativeInkPerfProbe.PerKindSnapshot()
+                };
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"RealtimeInkPerformanceMonitor.BuildNativeWetInkLiveStatus: {ex.Message}");
+                return null;
+            }
         }
 
         private static string GetHistoryPath() => Path.Combine(App.RootPath ?? string.Empty, HistoryFileName);

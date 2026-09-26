@@ -313,8 +313,8 @@ namespace Ink_Canvas.Windows.SettingsViews.Pages
             if (_mainWindow == null) return null;
             switch (hotkeyName)
             {
-                case "Undo": return () => _mainWindow.SymbolIconUndo_MouseUp(null, null);
-                case "Redo": return () => _mainWindow.SymbolIconRedo_MouseUp(null, null);
+                case "Undo": return () => _mainWindow.SymbolIconUndo_MouseUp(null, null, fromHotkey: true);
+                case "Redo": return () => _mainWindow.SymbolIconRedo_MouseUp(null, null, fromHotkey: true);
                 case "Clear": return () => _mainWindow.SymbolIconDelete_MouseUp(null, null);
                 case "Paste": return () => _mainWindow.HandleGlobalPaste(null, null);
                 case "SelectTool": return () => _mainWindow.SwitchToSelectFromHotkey();

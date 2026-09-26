@@ -335,6 +335,12 @@ namespace Ink_Canvas
                     // 静默保存
                     SaveInkCanvasStrokes(false, false);
                 }
+
+                // UI 联动独立画布的墨迹不在主画布 Strokes 里，必须单独落盘，否则
+                // 崩溃/被强杀时自上次解绑以来的批注会全部丢失。
+                // 与主画布共用同一自动保存开关与间隔；是否真正写盘由
+                // Settings.UILinkage.AutoSaveInk 决定（见 SaveUILinkageInk）。
+                SaveAllUILinkageInk();
             }
             catch (Exception)
             {

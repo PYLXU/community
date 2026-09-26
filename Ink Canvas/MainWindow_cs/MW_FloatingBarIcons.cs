@@ -894,21 +894,37 @@ namespace Ink_Canvas
         /// <param name="sender">发送者</param>
         /// <param name="e">鼠标按钮事件参数</param>
         internal void SymbolIconUndo_MouseUp(object sender, MouseButtonEventArgs e)
+            => SymbolIconUndo_MouseUp(sender, e, fromHotkey: false);
+
+        /// <summary>
+        /// 撤销按钮/快捷键统一入口。
+        /// <para>
+        /// <paramref name="fromHotkey"/> 为 true（Ctrl+Z / 路由命令）时按「最近落笔的画布」分派：
+        /// 用户刚在 Word 批注区写过字却按 Ctrl+Z，如果只回放主画布，撤销掉的会是白板内容，
+        /// 而 Word 上的错误笔迹仍在。工具栏按钮不带该标志，永远作用于主画布（按钮就在主画布上）。
+        /// </para>
+        /// </summary>
+        internal void SymbolIconUndo_MouseUp(object sender, MouseButtonEventArgs e, bool fromHotkey)
         {
             if (TryBlockFrozenPageMutation("撤销冻结页面内容")) return;
+
+            if (fromHotkey && TryUndoOnActiveUILinkageCanvas()) return;
+
             if (!IsUndoEnabled) return;
             BtnUndo_Click(null, null);
             HideSubPanels();
         }
 
-        /// <summary>
-        /// 重做按钮点击事件处理
-        /// </summary>
-        /// <param name="sender">发送者</param>
-        /// <param name="e">鼠标按钮事件参数</param>
         internal void SymbolIconRedo_MouseUp(object sender, RoutedEventArgs e)
+            => SymbolIconRedo_MouseUp(sender, e, fromHotkey: false);
+
+        /// <summary>重做按钮/快捷键统一入口，<paramref name="fromHotkey"/> 语义同撤销。</summary>
+        internal void SymbolIconRedo_MouseUp(object sender, RoutedEventArgs e, bool fromHotkey)
         {
             if (TryBlockFrozenPageMutation("重做冻结页面内容")) return;
+
+            if (fromHotkey && TryRedoOnActiveUILinkageCanvas()) return;
+
             if (!IsRedoEnabled) return;
             BtnRedo_Click(null, null);
             HideSubPanels();
@@ -1234,11 +1250,10 @@ namespace Ink_Canvas
         {
             if (TryBlockFrozenPageMutation("清除冻结页面内容")) return;
 
-            // UI 联动：清空所有可见绑定独立画布的视口墨迹（进入其独立撤销历史，可恢复）。
-            foreach (var inst in GetVisibleBoundUILinkageInstances())
-                inst.Canvas.ClearVisibleRegionStrokes();
+            // UI 联动：独立画布墨迹的清空已统一收敛到 PerformCanvasClear（见下方 BtnClear_Click 路径），
+            // 此处不再重复处理，避免同一动作在多条分支里被清两次、语义各说各话。
 
-            // 主画布照常清空（独立画布与主画布一并处理）。
+            // 主画布照常清空（独立画布的清空已统一收敛到 PerformCanvasClear，见下方 BtnClear_Click 路径）。
             if (inkCanvas.GetSelectedStrokes().Count > 0)
             {
                 var selectedStrokes = inkCanvas.GetSelectedStrokes();
@@ -1247,7 +1262,8 @@ namespace Ink_Canvas
                 GridInkCanvasSelectionCover.Visibility = Visibility.Collapsed;
                 HideSelectionDisplay();
             }
-            else if (inkCanvas.Strokes.Count > 0 || HasSecAgentSceneElementsOnCanvas())
+            else if (inkCanvas.Strokes.Count > 0 || HasSecAgentSceneElementsOnCanvas()
+                || HasVisibleUILinkageInk())
             {
                 if (Settings.Automation.IsAutoSaveScreenshotAtClear &&
                     inkCanvas.Strokes.Count > Settings.Automation.MinimumAutomationStrokeNumber)
@@ -4653,6 +4669,11 @@ namespace Ink_Canvas
             {
                 if (Pen_Icon.Background == null) PenIcon_Click(null, null);
             }
+
+            // UI 联动：清空所有可见绑定独立画布的全部墨迹。放在 PerformCanvasClear 内，
+            // 保证玻璃浮动栏/迷你栏/长按撤销/自动化等所有清屏入口口径一致。
+            foreach (var inst in GetVisibleBoundUILinkageInstances())
+                inst.Canvas.ClearAllStrokes();
 
             ClearStrokes(false);
             // 保存非笔画元素（如图片）
