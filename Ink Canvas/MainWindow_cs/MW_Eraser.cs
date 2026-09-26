@@ -32,8 +32,13 @@ namespace Ink_Canvas
 
         // 橡皮擦覆盖层相关控件
         private System.Windows.Controls.Canvas eraserOverlayCanvas;
-        private Image eraserFeedback;
-        private TranslateTransform eraserFeedbackTranslateTransform;
+
+        /// <summary>
+        /// 擦头足迹视觉。与卫星独立画布（内置图片查看器）共用
+        /// <see cref="Ink_Canvas.Ink.EraserFootprint"/> 这同一份实现与同一组图片资源
+        /// （<c>MW_Eraser.xaml</c>），擦头样式因此在所有画布上一致。
+        /// </summary>
+        private Ink_Canvas.Ink.EraserFootprint eraserFootprint;
 
         /// <summary>
         /// 橡皮擦覆盖层加载事件处理
@@ -50,12 +55,9 @@ namespace Ink_Canvas
             canvas.IsHitTestVisible = false;
             canvas.Visibility = Visibility.Collapsed;
 
-            // 获取橡皮擦反馈控件
-            eraserFeedback = FindName("EraserFeedback") as Image;
-            if (eraserFeedback != null)
-            {
-                eraserFeedbackTranslateTransform = eraserFeedback.RenderTransform as TranslateTransform;
-            }
+            // 擦头足迹：托管到共用实现（资源解析走本窗口，擦头图片来自 MW_Eraser.xaml）。
+            // XAML 里不再内联 <Image x:Name="EraserFeedback">，避免两处各写一套尺寸/定位逻辑。
+            eraserFootprint = new Ink_Canvas.Ink.EraserFootprint(canvas, this);
 
             // 绑定事件处理
             canvas.StylusDown += ((o, args) =>
@@ -92,20 +94,12 @@ namespace Ink_Canvas
         }
 
         /// <summary>
-        /// 更新橡皮擦样式
+        /// 更新橡皮擦样式（擦头足迹预览）。
+        /// 实际绘制交给共用的 <see cref="Ink_Canvas.Ink.EraserFootprint"/>。
         /// </summary>
         private void UpdateEraserStyle()
         {
-            if (eraserFeedback == null) return;
-
-            // 根据橡皮擦形状选择对应的图像资源
-            string resourceKey = isEraserCircleShape ? "EllipseEraserImageSource" : "RectangleEraserImageSource";
-            var imageSource = TryFindResource(resourceKey) as DrawingImage;
-
-            if (imageSource != null)
-            {
-                eraserFeedback.Source = imageSource;
-            }
+            eraserFootprint?.ApplyShape(isEraserCircleShape, eraserWidth);
         }
 
         /// <summary>
@@ -155,13 +149,11 @@ namespace Ink_Canvas
             scaleMatrix = new Matrix();
             scaleMatrix.ScaleAt(scaleX, scaleY, 0, 0);
 
-            // 设置橡皮擦反馈大小
-            if (eraserFeedback != null)
+            // 设置橡皮擦反馈大小（共用实现内部按 38:56 比例换算并重新测量）
+            if (eraserFootprint != null)
             {
-                eraserFeedback.Width = Math.Max(eraserWidth, 10);
-                eraserFeedback.Height = isEraserCircleShape ? eraserFeedback.Width : _h;
-                eraserFeedback.Measure(new Size(Double.PositiveInfinity, Double.PositiveInfinity));
-                eraserFeedback.Visibility = Visibility.Collapsed;
+                eraserFootprint.ApplyShape(isEraserCircleShape, eraserWidth);
+                eraserFootprint.Hide();
             }
         }
 
@@ -181,10 +173,7 @@ namespace Ink_Canvas
             ((UIElement)sender).ReleaseAllTouchCaptures();
 
             // 隐藏橡皮擦反馈
-            if (eraserFeedback != null)
-            {
-                eraserFeedback.Visibility = Visibility.Collapsed;
-            }
+            eraserFootprint?.Hide();
 
             // 结束碰撞检测
             if (hitTester != null)
@@ -242,17 +231,13 @@ namespace Ink_Canvas
             {
                 // 几何橡皮擦模式
                 // 显示橡皮擦反馈
-                if (eraserFeedback != null && eraserFeedback.Visibility == Visibility.Collapsed)
+                if (eraserFootprint != null && !eraserFootprint.IsVisible)
                 {
-                    eraserFeedback.Visibility = Visibility.Visible;
+                    eraserFootprint.Show();
                 }
 
                 // 更新橡皮擦位置
-                if (eraserFeedbackTranslateTransform != null)
-                {
-                    eraserFeedbackTranslateTransform.X = pt.X - eraserFeedback.ActualWidth / 2;
-                    eraserFeedbackTranslateTransform.Y = pt.Y - eraserFeedback.ActualHeight / 2;
-                }
+                eraserFootprint?.MoveTo(pt);
 
                 // 添加点到碰撞检测器
                 if (hitTester != null)
@@ -318,7 +303,10 @@ namespace Ink_Canvas
             _uiLinkageEraseInstance = null;
         }
 
-        /// <summary>笔画橡皮擦（线擦）在独立画布上擦除命中的墨迹（按点位解析多实例）。</summary>
+        /// <summary>
+        /// 笔画橡皮擦（线擦）在独立画布上擦除命中的墨迹（按点位解析多实例）。
+        /// 命中应用与主画布共用 <see cref="Ink_Canvas.Ink.StrokeEraseHitApplier"/>。
+        /// </summary>
         private void EraseUILinkageStrokeAt(Point pt)
         {
             if (!TryResolveUILinkageEraseInstance(pt, out var inst) || inst?.Canvas == null) return;
@@ -326,31 +314,22 @@ namespace Ink_Canvas
             // 且换算后的数据坐标才用于命中测试。
             if (!TryGetUILinkageLocalPoint(pt, inst, out var local)) return;
 
-            var hits = inst.Canvas.Strokes.HitTest(local)
-                .Where(stroke => !stroke.ContainsPropertyData(FrozenStrokePropertyGuid))
-                .ToArray();
-            if (hits.Length > 0)
+            if (Ink_Canvas.Ink.StrokeEraseHitApplier.ApplyWholeStrokeAt(
+                    inst.Canvas.Strokes, local, FrozenStrokePropertyGuid))
             {
-                inst.Canvas.Strokes.Remove(new StrokeCollection(hits));
                 // 墨迹活动归属：线擦作用于独立画布。
                 NoteUILinkageCanvasActivity();
             }
         }
 
-        /// <summary>独立画布面积擦的命中回调：与主画布几何擦除一致，仅作用于当前实例 Strokes。</summary>
+        /// <summary>
+        /// 独立画布面积擦的命中回调：与主画布几何擦除共用
+        /// <see cref="Ink_Canvas.Ink.StrokeEraseHitApplier"/>，只作用于当前实例 Strokes。
+        /// </summary>
         private void UILinkageEraser_StrokeHit(object sender, StrokeHitEventArgs args)
         {
-            var uiStrokes = _uiLinkageEraseInstance?.Canvas?.Strokes;
-            if (uiStrokes == null) return;
-
-            StrokeCollection eraseResult = args.GetPointEraseResults();
-            StrokeCollection strokesToReplace = new StrokeCollection { args.HitStroke };
-
-            var filtered = eraseResult.Where(stroke => !stroke.ContainsPropertyData(FrozenStrokePropertyGuid)).ToArray();
-            if (filtered.Length > 0)
-                uiStrokes.Replace(strokesToReplace, new StrokeCollection(filtered));
-            else
-                uiStrokes.Remove(strokesToReplace);
+            Ink_Canvas.Ink.StrokeEraseHitApplier.Apply(
+                _uiLinkageEraseInstance?.Canvas?.Strokes, args, FrozenStrokePropertyGuid);
         }
 
         /// <summary>
@@ -756,30 +735,13 @@ namespace Ink_Canvas
         }
 
         /// <summary>
-        /// 橡皮擦几何碰撞事件处理
+        /// 橡皮擦几何碰撞事件处理。
+        /// 命中应用逻辑与 UI 联动批注层共用 <see cref="Ink_Canvas.Ink.StrokeEraseHitApplier"/>。
         /// </summary>
         private void EraserGeometry_StrokeHit(object sender, StrokeHitEventArgs args)
         {
-            StrokeCollection eraseResult = args.GetPointEraseResults();
-            StrokeCollection strokesToReplace = new StrokeCollection { args.HitStroke };
-
-            // 过滤锁定的笔画
-            var filtered_2replace = strokesToReplace.Where(stroke => !stroke.ContainsPropertyData(FrozenStrokePropertyGuid));
-            var filtered2Replace = filtered_2replace as Stroke[] ?? filtered_2replace.ToArray();
-            if (!filtered2Replace.Any()) return;
-
-            var filtered_result = eraseResult.Where(stroke => !stroke.ContainsPropertyData(FrozenStrokePropertyGuid));
-            var filteredResult = filtered_result as Stroke[] ?? filtered_result.ToArray();
-
-            // 替换或删除笔画
-            if (filteredResult.Any())
-            {
-                inkCanvas.Strokes.Replace(new StrokeCollection(filtered2Replace), new StrokeCollection(filteredResult));
-            }
-            else
-            {
-                inkCanvas.Strokes.Remove(new StrokeCollection(filtered2Replace));
-            }
+            Ink_Canvas.Ink.StrokeEraseHitApplier.Apply(
+                inkCanvas?.Strokes, args, FrozenStrokePropertyGuid);
         }
 
         /// <summary>
@@ -835,10 +797,7 @@ namespace Ink_Canvas
             }
 
             // 隐藏橡皮擦反馈
-            if (eraserFeedback != null)
-            {
-                eraserFeedback.Visibility = Visibility.Collapsed;
-            }
+            eraserFootprint?.Hide();
 
             // A tool switch can disable the overlay before PointerUp is delivered. Commit
             // pending SVG scene snapshots here as well, otherwise the visual erase remains

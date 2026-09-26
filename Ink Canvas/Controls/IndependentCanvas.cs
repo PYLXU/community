@@ -21,8 +21,13 @@ namespace Ink_Canvas.Controls
     /// - 滚动同步：<see cref="SetScrollInfo"/> 传入目标偏移，墨迹以平滑过渡动画跟随。
     /// - 顶部「墨迹跟随页面平移」提示条（10s 自动关闭）；右下角独立撤销/恢复按钮
     ///   （只作用于本画布墨迹，与主画布 TimeMachine 互不影响）。
+    /// <para>
+    /// 派生说明：本类不是 sealed，<see cref="BackgroundLayer"/> / <see cref="ApplyInkTransform"/>
+    /// / <see cref="AutoSizeToViewport"/> 是给「填充式宿主」（内置图片查看器）预留的扩展点：
+    /// 背景层可以放图片底图，任意仿射变换让墨迹与底图保持同一坐标系。
+    /// </para>
     /// </summary>
-    public sealed class IndependentCanvas : UserControl
+    public class IndependentCanvas : UserControl
     {
         /// <summary>向外延伸的滚动条条带厚度（DIP）。</summary>
         private const double ScrollBarThickness = 24;
@@ -30,12 +35,26 @@ namespace Ink_Canvas.Controls
         private static readonly TimeSpan ScrollAnimDuration = TimeSpan.FromMilliseconds(220);
         private static readonly TimeSpan NoticeAutoCloseDelay = TimeSpan.FromSeconds(10);
 
+        /// <summary>
+        /// 触发滚动补间动画的最小位移（DIP，两轴绝对值之和）。
+        /// <para>
+        /// 低于该值的位移直接贴合：补间期间会订阅 <c>CompositionTarget.Rendering</c>，
+        /// 每帧对全部笔迹做 <c>Transform</c> 并重绘整块画布（目标窗口最大化后即全屏）。
+        /// 目标应用的读数抖动（渲染线程回写、滚动条单位换算取整）会带来持续的微小增量，
+        /// 一律动画会让渲染循环长时间无法空闲 —— CPU 被无意义地吃满。
+        /// </para>
+        /// </summary>
+        private const double ScrollAnimMinShiftDip = 1.0;
+
         private readonly Grid _rootGrid;
         private readonly Border _contentHost;
         private readonly Grid _inkHost;
+        private readonly System.Windows.Controls.Canvas _backgroundLayer;
+        private readonly System.Windows.Controls.Canvas _overlayLayer;
         private readonly InkCanvas _inkCanvas;
         private readonly System.Windows.Controls.Canvas _fadeLayer;
-        private readonly TranslateTransform _fadeLayerShift;
+        private readonly MatrixTransform _fadeLayerTransform;
+        private Matrix _fadeLayerMatrix = Matrix.Identity;
         private readonly ScrollBar _verticalScrollBar;
         private readonly ScrollBar _horizontalScrollBar;
         private readonly FrameworkElement _noticeBar;
@@ -99,20 +118,32 @@ namespace Ink_Canvas.Controls
 
             // 无内部填充色：保持透明，避免影响鼠标模式下的穿透视觉。
             //
+            // 背景层：位于墨迹之下、与墨迹同坐标系。基类自身不使用（保持空），
+            // 派生宿主（内置图片查看器）在此放图片底图；放在 _inkHost 内可保证与墨迹一起
+            // 被 ClipToBounds 裁剪、共享同一套坐标。IsHitTestVisible=false 使其不抢输入。
+            _backgroundLayer = new System.Windows.Controls.Canvas
+            {
+                Background = null,
+                IsHitTestVisible = false,
+                ClipToBounds = true
+            };
+
             // 渐隐层：与内层 InkCanvas 同一坐标系（两者都在同一个 Grid 单元格里、同尺寸同原点），
             // 供宿主共享的 InkFadeManager 挂载激光笔/渐隐笔迹的视觉副本。因为滚动同步是把
             // 笔迹数据整体 Transform 平移的，渐隐层也必须跟着平移，否则渐隐中的激光笔迹
-            // 会与画布内容错位（见 ApplyShift）。
+            // 会与画布内容错位（见 ApplyShift）。用矩阵而非平移量，是为了让派生宿主
+            // （图片查看器）的缩放/旋转也能同步到渐隐视觉。
             _fadeLayer = new System.Windows.Controls.Canvas
             {
                 Background = null,
                 IsHitTestVisible = false,
                 ClipToBounds = true
             };
-            _fadeLayerShift = new TranslateTransform();
-            _fadeLayer.RenderTransform = _fadeLayerShift;
+            _fadeLayerTransform = new MatrixTransform(_fadeLayerMatrix);
+            _fadeLayer.RenderTransform = _fadeLayerTransform;
 
             _inkHost = new Grid();
+            _inkHost.Children.Add(_backgroundLayer);
             _inkHost.Children.Add(_inkCanvas);
             _inkHost.Children.Add(_fadeLayer);
 
@@ -121,6 +152,16 @@ namespace Ink_Canvas.Controls
                 Child = _inkHost,
                 Background = Brushes.Transparent,
                 BorderBrush = Brushes.Transparent,
+                ClipToBounds = true
+            };
+
+            // 覆盖层：与视口同坐标系、**不随视图变换**的宿主，供派生宿主放「屏幕空间」的
+            // 交互装饰（内置图片查看器在这里放橡皮擦擦头足迹 —— 擦头必须跟着指针走，
+            // 绝不能被墨迹的缩放/旋转带着跑）。不接收命中测试，因此不会抢走书写/擦除输入。
+            _overlayLayer = new System.Windows.Controls.Canvas
+            {
+                Background = null,
+                IsHitTestVisible = false,
                 ClipToBounds = true
             };
 
@@ -222,6 +263,7 @@ namespace Ink_Canvas.Controls
             Grid.SetColumn(_horizontalScrollBar, 0);
 
             _rootGrid.Children.Add(_contentHost);
+            _rootGrid.Children.Add(_overlayLayer);
             _rootGrid.Children.Add(_verticalScrollBar);
             _rootGrid.Children.Add(_horizontalScrollBar);
             _rootGrid.Children.Add(_noticeBar);
@@ -286,6 +328,25 @@ namespace Ink_Canvas.Controls
         /// 避免把本就不接收输入的画布状态改坏。
         /// </summary>
         public bool TouchSuppressionEnabled { get; set; } = true;
+
+        /// <summary>
+        /// 非批注状态下是否仍需要接收输入（默认 false，即整块画布让出命中测试）。
+        /// <para>
+        /// 内置图片查看器必须覆写为 true：它要在鼠标/漫游模式下继续用鼠标拖动与双指手势
+        /// 平移缩放图片，因此不能像 UI 联动批注层那样在非批注状态被彻底禁用；
+        /// 不落墨由 <c>EditingMode = None</c> 保证（见 <c>IndependentCanvasStateSync</c>）。
+        /// </para>
+        /// </summary>
+        public virtual bool RequiresInputWhenIdle => false;
+
+        /// <summary>
+        /// 是否接受宿主按批注状态暂停/恢复本画布的浮层（滚动条、撤销/恢复按钮等），默认 true。
+        /// <para>
+        /// 内置图片查看器覆写为 false：它的滚动条本就按设计隐藏，而撤销/恢复按钮是批注的
+        /// 主要入口，不该因为切到鼠标模式就消失。
+        /// </para>
+        /// </summary>
+        public virtual bool HostControlsOverlaySuppression => true;
 
         // ---------------- 手掌擦（与主画布同一套接触面积判定） ----------------
 
@@ -377,7 +438,12 @@ namespace Ink_Canvas.Controls
             // 单指：记录快照，供「第二指紧随其后」时回滚这一笔。
             if (_touchDownIds.Count == 1)
             {
-                _touchStrokeSnapshot = _inkCanvas.Strokes.Clone();
+                // 只有可能落墨的模式才值得克隆整份笔迹集合：None / 擦除模式下这一指
+                // 本就不会新增笔迹，回滚也就无所指。触摸屏上每次落指都克隆一次全量笔迹
+                // 是实打实的卡顿来源，图片查看器这类「始终接收输入」的宿主尤其明显。
+                bool mayCollectInk = _inkCanvas.EditingMode == InkCanvasEditingMode.Ink
+                                     || _inkCanvas.EditingMode == InkCanvasEditingMode.Select;
+                _touchStrokeSnapshot = mayCollectInk ? _inkCanvas.Strokes.Clone() : null;
                 return;
             }
 
@@ -790,13 +856,27 @@ namespace Ink_Canvas.Controls
 
             // 控件总尺寸 = 视口 + 向外延伸的滚动条条带（条带保留与否取决于设置而非暂停状态，
             // 避免鼠标模式切换时视口尺寸跳动）。
-            double targetW = _viewportW + (_showVerticalBar ? ScrollBarThickness : 0);
-            double targetH = _viewportH + (_showHorizontalBar ? ScrollBarThickness : 0);
-            if (Width != targetW) Width = targetW;
-            if (Height != targetH) Height = targetH;
+            // 填充式宿主（AutoSizeToViewport=false）的尺寸由父容器布局决定，这里不能覆盖。
+            if (AutoSizeToViewport)
+            {
+                double targetW = _viewportW + (_showVerticalBar ? ScrollBarThickness : 0);
+                double targetH = _viewportH + (_showHorizontalBar ? ScrollBarThickness : 0);
+                if (Width != targetW) Width = targetW;
+                if (Height != targetH) Height = targetH;
+            }
 
             UpdateOverlayVisibility();
         }
+
+        /// <summary>
+        /// 为 false 时本控件不再把 <c>Width</c>/<c>Height</c> 绑定到
+        /// <see cref="SetViewportSize"/> 传入的视口尺寸，而由父容器布局决定（默认 true）。
+        /// <para>
+        /// 图片查看器这类「填充式宿主」必须置 false：窗口尺寸变化时画布应跟着拉伸，
+        /// 而不是被 SetViewportSize 钉死成上一次的视口大小。
+        /// </para>
+        /// </summary>
+        public bool AutoSizeToViewport { get; set; } = true;
 
         /// <summary>
         /// 统一维护滚动条与撤销/恢复按钮的可见性：
@@ -884,7 +964,12 @@ namespace Ink_Canvas.Controls
             // 内容向下/向右滚，墨迹随之向上/向左平移，保持贴合内容。
             var shift = new Vector(-deltaX, -deltaY);
 
-            if (!animate || _snapNextScrollSync)
+            // 位移低于阈值不值得起补间（见 ScrollAnimMinShiftDip）：
+            // 补间是 60fps 的「全量笔迹 Transform + 全屏重绘」，微增量直接贴合更划算。
+            bool animateThisShift = animate
+                && Math.Abs(shift.X) + Math.Abs(shift.Y) >= ScrollAnimMinShiftDip;
+
+            if (!animateThisShift || _snapNextScrollSync)
             {
                 _snapNextScrollSync = false;
                 StopScrollAnimation();
@@ -922,8 +1007,8 @@ namespace Ink_Canvas.Controls
             _scrollY = 0;
             // 坐标系回到新文档原点：渐隐层（若有残留的渐隐视觉）也要回到原点，
             // 否则它会带着旧文档的滚动偏移继续漂浮。
-            _fadeLayerShift.X = 0;
-            _fadeLayerShift.Y = 0;
+            _fadeLayerMatrix = Matrix.Identity;
+            _fadeLayerTransform.Matrix = _fadeLayerMatrix;
             // 竖直条用视口高、水平条用视口宽；extent 取视口本身（范围归零）。
             // 原实现给竖直条传了 _viewportW、extent 硬编码 1，会让竖直条的 ViewportSize
             // 与实际视口不符、Maximum 恒为 0，辅助滚动按钮的可用状态随之错乱。
@@ -1017,16 +1102,73 @@ namespace Ink_Canvas.Controls
         private void ApplyShift(Vector shift)
         {
             if (shift.X == 0 && shift.Y == 0) return;
+            ApplyInkTransform(new Matrix(1, 0, 0, 1, shift.X, shift.Y));
+        }
 
-            // 渐隐层（激光笔渐隐视觉）与笔迹同坐标系，必须同步平移，否则渐隐中的笔迹会错位。
-            _fadeLayerShift.X += shift.X;
-            _fadeLayerShift.Y += shift.Y;
+        /// <summary>
+        /// 对全部笔迹与渐隐层应用一次仿射增量变换。
+        /// <para>
+        /// 这是本画布「笔迹数据坐标 == 视觉坐标」不变式的唯一入口：滚动同步传平移矩阵；
+        /// 派生宿主（内置图片查看器）传缩放/旋转矩阵。因为变换被真实烘焙进笔迹点集，
+        /// 橡皮擦命中测试、框选、坐标换算全都不需要知道视图变换的存在。
+        /// </para>
+        /// <para>
+        /// <paramref name="matrix"/> 是<b>视口坐标系里的增量</b>（左乘新变换、右乘旧变换的
+        /// 组合顺序已在调用方算好），因此这里直接以「先已有、后增量」的顺序累乘。
+        /// </para>
+        /// </summary>
+        protected void ApplyInkTransform(Matrix matrix)
+        {
+            // 渐隐视觉与笔迹同坐标系，必须同步变换，否则渐隐中的笔迹会与墨迹错位。
+            _fadeLayerMatrix = _fadeLayerMatrix * matrix;
+            _fadeLayerTransform.Matrix = _fadeLayerMatrix;
 
             if (_inkCanvas.Strokes.Count == 0) return;
 
-            var matrix = new Matrix(1, 0, 0, 1, shift.X, shift.Y);
             foreach (Stroke stroke in _inkCanvas.Strokes)
                 stroke.Transform(matrix, false);
+        }
+
+        /// <summary>
+        /// 背景层（图片底图等）：位于墨迹之下、与墨迹同坐标系。
+        /// <para>
+        /// 基类保持为空且不接收命中测试。派生宿主往 <c>Children</c> 里放内容，
+        /// 并用 <see cref="ApplyInkTransform"/> 的同一次变换同步它，即可让底图与墨迹
+        /// 始终贴合（图片查看器的缩放/旋转/平移就是这样实现的）。
+        /// </para>
+        /// </summary>
+        protected System.Windows.Controls.Canvas BackgroundLayer => _backgroundLayer;
+
+        /// <summary>
+        /// 覆盖层（**不随视图变换**的屏幕空间装饰宿主）：位于视口之上、与视口同坐标系，
+        /// 且不接收命中测试。
+        /// <para>
+        /// 与 <see cref="BackgroundLayer"/> 的区别：背景层在墨迹之下且与墨迹共享坐标变换；
+        /// 覆盖层在墨迹之上且<b>不参与变换</b>。内置图片查看器用它承载橡皮擦擦头足迹 ——
+        /// 擦头必须跟着指针走，不能被图片的缩放/旋转带着跑。
+        /// </para>
+        /// </summary>
+        protected System.Windows.Controls.Canvas OverlayLayer => _overlayLayer;
+
+        /// <summary>
+        /// 渐隐层当前累积的变换矩阵（供派生宿主把底图设成同一变换）。
+        /// </summary>
+        protected Matrix InkTransformMatrix => _fadeLayerMatrix;
+
+        /// <summary>
+        /// 把渐隐层的累积变换归零，<b>但不移动任何笔迹</b>。
+        /// <para>
+        /// 派生宿主在「整体替换内容」（如图片查看器换图）时使用：调用方随后会自行把笔迹
+        /// 集合换成属于新内容的那些，因此这里不能也不需要去平移旧笔迹；但渐隐层的累积
+        /// 变换必须与宿主新设的绝对变换同时归零，否则二者会永久错位。
+        /// </para>
+        /// </summary>
+        protected void ResetInkTransformWithoutMovingStrokes()
+        {
+            _fadeLayerMatrix = Matrix.Identity;
+            _fadeLayerTransform.Matrix = _fadeLayerMatrix;
+            _pendingShift = default;
+            StopScrollAnimation();
         }
 
         private static void ApplyToScrollBar(ScrollBar bar, double value, double viewportSize, double extentSize)

@@ -1,0 +1,312 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <xsd:schema id="root" xmlns="" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:msdata="urn:schemas-microsoft-com:xml-msdata">
+    <xsd:import namespace="http://www.w3.org/XML/1998/namespace" />
+    <xsd:element name="root" msdata:IsDataSet="true">
+      <xsd:complexType>
+        <xsd:choice maxOccurs="unbounded">
+          <xsd:element name="metadata">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" />
+              </xsd:sequence>
+              <xsd:attribute name="name" use="required" type="xsd:string" />
+              <xsd:attribute name="type" type="xsd:string" />
+              <xsd:attribute name="mimetype" type="xsd:string" />
+              <xsd:attribute ref="xml:space" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="assembly">
+            <xsd:complexType>
+              <xsd:attribute name="alias" type="xsd:string" />
+              <xsd:attribute name="name" type="xsd:string" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="data">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
+                <xsd:element name="comment" type="xsd:string" minOccurs="0" msdata:Ordinal="2" />
+              </xsd:sequence>
+              <xsd:attribute name="name" type="xsd:string" use="required" msdata:Ordinal="1" />
+              <xsd:attribute name="type" type="xsd:string" msdata:Ordinal="3" />
+              <xsd:attribute name="mimetype" type="xsd:string" msdata:Ordinal="4" />
+              <xsd:attribute ref="xml:space" />
+            </xsd:complexType>
+          </xsd:element>
+        </xsd:choice>
+      </xsd:complexType>
+    </xsd:element>
+  </xsd:schema>
+  <resheader name="resmimetype"><value>text/microsoft-resx</value></resheader>
+  <resheader name="version"><value>2.0</value></resheader>
+  <resheader name="reader"><value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader>
+  <resheader name="writer"><value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader>
+  <data name="GroupTitle" xml:space="preserve">
+    <value>图片查看器</value>
+  </data>
+  <data name="MasterToggle" xml:space="preserve">
+    <value>启用内置图片查看器</value>
+  </data>
+  <data name="MasterToggleHint" xml:space="preserve">
+    <value>把常见图片格式绑定到本程序：双击已绑定的图片即以一块独立画布打开，背景为图片本身，可直接在图片上批注</value>
+  </data>
+  <data name="FormatsGroupHeader" xml:space="preserve">
+    <value>格式绑定</value>
+  </data>
+  <data name="FormatsHint" xml:space="preserve">
+    <value>勾选需要由本程序打开的图片格式；未勾选的格式仍交由系统默认程序打开</value>
+  </data>
+  <data name="FormatsUnsupportedSuffix" xml:space="preserve">
+    <value>（系统不支持解码）</value>
+  </data>
+  <data name="NoFormatsBound" xml:space="preserve">
+    <value>尚未绑定任何格式：当前不会接管任何图片</value>
+  </data>
+  <data name="SelectAllCommon" xml:space="preserve">
+    <value>全选本机可用的常见格式</value>
+  </data>
+  <data name="ClearAll" xml:space="preserve">
+    <value>全部取消</value>
+  </data>
+  <data name="CustomFormatHeader" xml:space="preserve">
+    <value>自定义扩展名</value>
+  </data>
+  <data name="CustomFormatDescription" xml:space="preserve">
+    <value>补充清单之外的图片扩展名（例如 .jxl）。输入后按回车或点「添加」</value>
+  </data>
+  <data name="CustomFormatPlaceholder" xml:space="preserve">
+    <value>例如 .jxl</value>
+  </data>
+  <data name="AddCustomFormat" xml:space="preserve">
+    <value>添加</value>
+  </data>
+  <data name="CustomFormatInvalid" xml:space="preserve">
+    <value>扩展名无效：需形如 .png</value>
+  </data>
+  <data name="CustomFormatDuplicate" xml:space="preserve">
+    <value>该扩展名已在列表中</value>
+  </data>
+  <data name="CustomFormatAdded" xml:space="preserve">
+    <value>已添加 {0}；若本机无法解码该格式，双击时会提示</value>
+  </data>
+  <data name="AssociationGroupHeader" xml:space="preserve">
+    <value>系统关联</value>
+  </data>
+  <data name="RegisterFileAssociation" xml:space="preserve">
+    <value>写入「打开方式」列表</value>
+  </data>
+  <data name="RegisterFileAssociationHint" xml:space="preserve">
+    <value>把已绑定格式登记到当前用户注册表，使其出现在资源管理器右键「打开方式」中（无需管理员权限）</value>
+  </data>
+  <data name="ApplyAssociation" xml:space="preserve">
+    <value>立即写入关联</value>
+  </data>
+  <data name="RemoveAssociation" xml:space="preserve">
+    <value>清除本程序写入的关联</value>
+  </data>
+  <data name="DefaultAppHint" xml:space="preserve">
+    <value>Windows 不允许程序静默修改默认应用；若要直接双击打开，请在系统设置里把对应文件类型指定给本程序</value>
+  </data>
+  <data name="OpenDefaultApps" xml:space="preserve">
+    <value>打开系统默认应用设置</value>
+  </data>
+  <data name="AssociationStatusHeader" xml:space="preserve">
+    <value>关联状态</value>
+  </data>
+  <data name="AssociationStatusWritten" xml:space="preserve">
+    <value>已写入</value>
+  </data>
+  <data name="AssociationStatusNotWritten" xml:space="preserve">
+    <value>未写入</value>
+  </data>
+  <data name="AssociationNoneBound" xml:space="preserve">
+    <value>尚未绑定任何格式</value>
+  </data>
+  <data name="AssociationWriteResult" xml:space="preserve">
+    <value>写入完成：成功 {0} 个，失败 {1} 个</value>
+  </data>
+  <data name="AssociationRemoved" xml:space="preserve">
+    <value>已清除本程序写入的关联</value>
+  </data>
+  <data name="ViewerGroupHeader" xml:space="preserve">
+    <value>查看器窗口</value>
+  </data>
+  <data name="MultiInstance" xml:space="preserve">
+    <value>多实例（每张图片一个窗口）</value>
+  </data>
+  <data name="MultiInstanceHint" xml:space="preserve">
+    <value>开启时每张图片各自一个独立窗口，任务栏为每个窗口显示实时预览并可分别唤起；关闭时后打开的图片复用同一个窗口</value>
+  </data>
+  <data name="ShowInTaskbar" xml:space="preserve">
+    <value>在任务栏显示图标</value>
+  </data>
+  <data name="ShowInTaskbarHint" xml:space="preserve">
+    <value>最小化后可通过任务栏缩略图快速唤起</value>
+  </data>
+  <data name="EdgeSnap" xml:space="preserve">
+    <value>拖到屏幕边缘吸附分屏</value>
+  </data>
+  <data name="EdgeSnapHint" xml:space="preserve">
+    <value>拖到屏幕顶部放开 → 最大化；拖到左/右侧放开 → 左/右半屏分屏。窗口始终不会被拖出屏幕范围</value>
+  </data>
+  <data name="RememberWindowPlacement" xml:space="preserve">
+    <value>记住窗口位置与大小</value>
+  </data>
+  <data name="RememberWindowPlacementHint" xml:space="preserve">
+    <value>下次打开图片时沿用上次的窗口位置与大小（超出屏幕时自动收回可见区域）</value>
+  </data>
+  <data name="OpenFitToWindow" xml:space="preserve">
+    <value>打开时适应窗口</value>
+  </data>
+  <data name="OpenFitToWindowHint" xml:space="preserve">
+    <value>关闭则按图片原始像素 100% 显示</value>
+  </data>
+  <data name="AutoSaveAnnotations" xml:space="preserve">
+    <value>自动保存批注</value>
+  </data>
+  <data name="AutoSaveAnnotationsHint" xml:space="preserve">
+    <value>关闭查看器时把批注保存到配置目录，下次打开同一张图片自动恢复</value>
+  </data>
+  <data name="BackgroundColor" xml:space="preserve">
+    <value>留白区域背景色</value>
+  </data>
+  <data name="BackgroundColorHint" xml:space="preserve">
+    <value>图片之外的区域使用的颜色</value>
+  </data>
+  <data name="TestOpenImage" xml:space="preserve">
+    <value>打开一张图片测试</value>
+  </data>
+  <data name="DisabledNotice" xml:space="preserve">
+    <value>图片查看器已关闭：当前不会接管任何图片格式</value>
+  </data>
+  <data name="BarPrevious" xml:space="preserve">
+    <value>上一张</value>
+  </data>
+  <data name="BarFolder" xml:space="preserve">
+    <value>文件夹</value>
+  </data>
+  <data name="BarNext" xml:space="preserve">
+    <value>下一张</value>
+  </data>
+  <data name="BarZoomIn" xml:space="preserve">
+    <value>放大</value>
+  </data>
+  <data name="BarZoomOut" xml:space="preserve">
+    <value>缩小</value>
+  </data>
+  <data name="BarRotateCw" xml:space="preserve">
+    <value>顺时针旋转 90°</value>
+  </data>
+  <data name="BarRotateCcw" xml:space="preserve">
+    <value>逆时针旋转 90°</value>
+  </data>
+  <data name="BarAdjust" xml:space="preserve">
+    <value>图像调整</value>
+  </data>
+  <data name="BarMinimize" xml:space="preserve">
+    <value>最小化</value>
+  </data>
+  <data name="BarMaximize" xml:space="preserve">
+    <value>最大化</value>
+  </data>
+  <data name="BarRestore" xml:space="preserve">
+    <value>还原</value>
+  </data>
+  <data name="BarFullScreen" xml:space="preserve">
+    <value>全屏</value>
+  </data>
+  <data name="BarExitFullScreen" xml:space="preserve">
+    <value>退出全屏</value>
+  </data>
+  <data name="BarClose" xml:space="preserve">
+    <value>关闭</value>
+  </data>
+  <data name="BarUndo" xml:space="preserve">
+    <value>撤销批注</value>
+  </data>
+  <data name="BarRedo" xml:space="preserve">
+    <value>恢复批注</value>
+  </data>
+  <data name="BarFitToWindow" xml:space="preserve">
+    <value>适应窗口</value>
+  </data>
+  <data name="BarActualSize" xml:space="preserve">
+    <value>原始大小</value>
+  </data>
+  <data name="AdjustTitle" xml:space="preserve">
+    <value>图像调整</value>
+  </data>
+  <data name="AdjustBrightness" xml:space="preserve">
+    <value>亮度</value>
+  </data>
+  <data name="AdjustContrast" xml:space="preserve">
+    <value>对比度</value>
+  </data>
+  <data name="AdjustSaturation" xml:space="preserve">
+    <value>饱和度</value>
+  </data>
+  <data name="AdjustReset" xml:space="preserve">
+    <value>重置</value>
+  </data>
+  <data name="WindowTitleSuffix" xml:space="preserve">
+    <value>图片查看器</value>
+  </data>
+  <data name="LoadFailedTitle" xml:space="preserve">
+    <value>无法打开图片</value>
+  </data>
+  <data name="LoadFailedMessage" xml:space="preserve">
+    <value>无法解码该图片文件：{0}</value>
+  </data>
+  <data name="ImageInfoFormat" xml:space="preserve">
+    <value>{0} × {1} 像素 · 缩放 {2}%</value>
+  </data>
+  <data name="ImageIndexFormat" xml:space="preserve">
+    <value>第 {0} / {1} 张</value>
+  </data>
+  <data name="MenuShowInExplorer" xml:space="preserve">
+    <value>在资源管理器中显示</value>
+  </data>
+  <data name="MenuCopyPath" xml:space="preserve">
+    <value>复制文件路径</value>
+  </data>
+  <data name="MenuFitWindow" xml:space="preserve">
+    <value>适应窗口</value>
+  </data>
+  <data name="MenuActualSize" xml:space="preserve">
+    <value>原始大小</value>
+  </data>
+  <data name="SingleInstanceReused" xml:space="preserve">
+    <value>已启用单实例模式：后打开的图片会复用同一个窗口</value>
+  </data>
+  <data name="DragHint" xml:space="preserve">
+    <value>拖动空白处可移动窗口 · 拖动边框可调整大小</value>
+  </data>
+  <data name="BarInkWriting" xml:space="preserve">
+    <value>墨迹书写</value>
+  </data>
+  <data name="BarInkWritingHint" xml:space="preserve">
+    <value>切换到批注模式：主工具栏进入笔状态后，即可直接在本图片上书写批注（与 UI 联动画布行为一致）</value>
+  </data>
+  <data name="BarInkWritingActiveHint" xml:space="preserve">
+    <value>当前正在批注：点击可退出批注模式回到鼠标</value>
+  </data>
+  <data name="BarRotateCwShort" xml:space="preserve">
+    <value>顺时针</value>
+  </data>
+  <data name="BarRotateCcwShort" xml:space="preserve">
+    <value>逆时针</value>
+  </data>
+  <data name="WindowTitleBrand" xml:space="preserve">
+    <value>Ink Canvas 图片查看器</value>
+  </data>
+  <data name="ResetToDefault" xml:space="preserve">
+    <value>恢复默认</value>
+  </data>
+  <data name="ResetBackgroundColorHint" xml:space="preserve">
+    <value>把留白区域背景色恢复为默认深灰</value>
+  </data>
+  <data name="FullScreenExitHint" xml:space="preserve">
+    <value>按 Esc 或点击此处退出全屏</value>
+  </data>
+</root>

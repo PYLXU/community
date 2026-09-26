@@ -1994,20 +1994,20 @@ namespace Ink_Canvas
         [JsonProperty("showInTaskbar")]
         public bool ShowInTaskbar { get; set; } = true;
 
-        /// <summary>
-        /// 拖动到屏幕边缘时吸附：顶部 → 最大化，左/右 → 半屏（左右分屏）。
-        /// 关闭后窗口仍不会超出屏幕范围。
-        /// </summary>
-        [JsonProperty("edgeSnap")]
-        public bool EdgeSnap { get; set; } = true;
-
         /// <summary>图片之外的留白区域背景色（#AARRGGBB）。</summary>
         [JsonProperty("backgroundColor")]
-        public string BackgroundColor { get; set; } = "#FF1E1E1E";
+        public string BackgroundColor { get; set; } = DefaultBackgroundColor;
 
-        /// <summary>记住最后一次窗口位置与大小，下次打开图片时沿用。</summary>
+        /// <summary>留白区域背景色的默认值（「恢复默认」按钮用）。</summary>
+        public const string DefaultBackgroundColor = "#FF1E1E1E";
+
+        /// <summary>
+        /// 记住最后一次窗口位置与大小，下次打开图片时沿用。
+        /// 默认关闭：查看器是「按需打开的临时窗口」，默认居中打开更符合预期，
+        /// 也避免用户把窗口拖到副屏后、副屏拔掉时找不到窗口。
+        /// </summary>
         [JsonProperty("rememberWindowPlacement")]
-        public bool RememberWindowPlacement { get; set; } = true;
+        public bool RememberWindowPlacement { get; set; } = false;
 
         /// <summary>上次窗口左边界（DIP）；null 表示尚未记录。</summary>
         [JsonProperty("windowLeft")]

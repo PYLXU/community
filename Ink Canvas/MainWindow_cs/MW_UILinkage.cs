@@ -50,11 +50,34 @@ namespace Ink_Canvas
 
         private static readonly TimeSpan UILinkagePollInterval = TimeSpan.FromMilliseconds(250);
 
+        /// <summary>
+        /// 滚动读数「连续」失败多少次才判定实例失效并解绑。
+        /// <para>
+        /// 单次读取失败是常态（画布子窗口被重建、渲染线程尚未回写实际位置、切换显示模式），
+        /// 而解绑会连带触发「下一拍重新绑定 → 绑定内同步端点校准（SB_BOTTOM + 最多 192 次
+        /// 阻塞 <c>SendMessageTimeout</c>）→ 再读失败」，形成一次瞬时失败就能点燃的死循环，
+        /// CPU 与交互线程同时被打满。因此必须连续失败到阈值才解绑。
+        /// </para>
+        /// </summary>
+        private const int UILinkageScrollReadFailureLimit = 5;
+
         /// <summary>缩放指示元素查找冷却：缓存失效后短时间内不重复做状态栏 UIA 遍历。</summary>
         private static readonly TimeSpan UILinkageZoomFindCooldown = TimeSpan.FromSeconds(2);
 
         /// <summary>页面子元素查找冷却：缓存失效后短时间内不重复查找（避免高频 UIA 遍历）。</summary>
         private static readonly TimeSpan UILinkagePageFindCooldown = TimeSpan.FromSeconds(2);
+
+        /// <summary>Word 文本区（_WwG）窗口查找冷却：句柄失效后短时间内不重复枚举子窗口。</summary>
+        private static readonly TimeSpan UILinkageWordTextAreaFindCooldown = TimeSpan.FromSeconds(2);
+
+        /// <summary>
+        /// 水平轴「滚动条帧 ↔ 页面实测帧」常量偏移的稳定判据（DIP）：两次标定差值在容差内才跟随；
+        /// 超出视为页面实测帧跳变（元素失效 / 被裁剪 / 重排中），保留旧标定值。
+        /// </summary>
+        private const double UILinkageWordHorizontalFrameToleranceDip = 8.0;
+
+        /// <summary>横向读数诊断日志的最小间隔（仅在读数形态变化时写，且不高于该频率）。</summary>
+        private static readonly TimeSpan UILinkageWordHorizontalTraceInterval = TimeSpan.FromSeconds(2);
 
         /// <summary>同一窗口的节流窗口：短时间内不重复做 UIA 整树遍历。</summary>
         private static readonly TimeSpan UILinkageCaptureThrottle = TimeSpan.FromMilliseconds(300);
@@ -207,6 +230,69 @@ namespace Ink_Canvas
 
             /// <summary>最近一次实测的页面左缘视口位移（DIP，NaN = 尚无有效读数）。</summary>
             public double LastPageLeftDip = double.NaN;
+
+            // ---- 横向滚动读数（仅 Word；水平滚动条优先，页面实测只用于标定绝对帧） ----
+
+            /// <summary>
+            /// Word 文本区窗口（类名 <c>_WwG</c>）句柄：横向滚动位置与范围取自其水平滚动条
+            /// （<c>GetScrollInfo(SB_HORZ)</c>）。Word 的 UIA ScrollPattern 横向读数不可靠
+            /// （横向常报 NoScroll/0、HorizontalViewSize 报 100），横向必须另找可靠来源。
+            /// </summary>
+            public IntPtr WordTextAreaHwnd;
+
+            /// <summary>文本区窗口下次允许重找的时间（冷却节流，避免每拍枚举子窗口）。</summary>
+            public DateTime NextWordTextAreaFindUtc = DateTime.MinValue;
+
+            /// <summary>
+            /// 水平轴「滚动条帧 → 页面实测帧」的常量偏移（DIP，NaN = 尚未标定）。
+            /// <para>
+            /// 水平<b>位置</b>以滚动条读数为准（可靠、与窗口尺寸/DPI 无关），但绝对<b>对齐</b>
+            /// 沿用页面左缘实测帧：两者只差一个常量（页面居中留白、桌面边距）。标定一次后一直沿用，
+            /// 避免在两种口径之间来回跳导致墨迹横移；页面实测帧发生跳变（元素失效、被裁剪、
+            /// 重排中）时保留旧值 —— 位置仍由滚动条推进，不会因此停住或弹回。
+            /// </para>
+            /// </summary>
+            public double WordHorizontalFrameOffset = double.NaN;
+
+            /// <summary>
+            /// 上一次帧标定取样时的滚动条偏移（DIP，NaN = 尚未取样）。
+            /// 与 <see cref="LastWordFrameSamplePageLeftDip"/> 一起判定「页面实测是否确实跟着滚动」：
+            /// 页面读数卡住（元素被裁剪/失效但仍返回旧矩形）时若还去跟随它，标定出的帧会把滚动
+            /// 位移整个抵消掉 —— 那正是「墨迹不滚动」的另一种成因。
+            /// </summary>
+            public double LastWordFrameSampleBarOffset = double.NaN;
+
+            /// <summary>上一次帧标定取样时的页面左缘实测值（DIP）。</summary>
+            public double LastWordFrameSamplePageLeftDip = double.NaN;
+
+            /// <summary>横向读数最近一次写诊断日志的时间与摘要（变化时才写，避免每拍刷日志）。</summary>
+            public DateTime LastWordHorizontalTraceUtc = DateTime.MinValue;
+            public string LastWordHorizontalTraceKey;
+
+            // ---- 遮挡裁剪缓存 ----
+
+            /// <summary>
+            /// 上次计算遮挡裁剪时的视口矩形（屏幕物理像素；<see cref="Rect.Empty"/> = 尚未计算）。
+            /// <para>
+            /// 与 <see cref="LastClipOccludedRects"/> 一起作为缓存键：二者都没变就不重新构造
+            /// <c>OpacityMask</c>。这块画布在目标窗口最大化时等于整屏，每 250ms 无条件下写遮挡
+            /// 蒙版会让整块全屏画布重新合成（分层窗口下是软件路径），是本功能最主要的 CPU 来源。
+            /// </para>
+            /// </summary>
+            public Rect LastClipViewportRect = Rect.Empty;
+
+            /// <summary>上次计算裁剪时使用的 DPI 缩放（与矩形一起构成缓存键）。</summary>
+            public double LastClipDpiScaleX;
+            public double LastClipDpiScaleY;
+
+            /// <summary>上次用于裁剪的遮挡矩形集合（屏幕物理像素；null = 尚未计算）。</summary>
+            public List<Rect> LastClipOccludedRects;
+
+            /// <summary>
+            /// 滚动读数「连续」失败次数（成功一次即清零）。
+            /// 见 <see cref="UILinkageScrollReadFailureLimit"/>：单次失败不应直接解绑。
+            /// </summary>
+            public int ScrollReadFailureCount;
         }
 
         /// <summary>按文档持久化的滚动位置（UILinkageInk/<doc>.json）。</summary>
@@ -221,6 +307,17 @@ namespace Ink_Canvas
             /// <summary>保存墨迹时的 Word 缩放百分比：载入时按当前缩放/保存缩放重缩放历史墨迹。</summary>
             [Newtonsoft.Json.JsonProperty("zoomPercent")]
             public double ZoomPercent { get; set; } = double.NaN;
+
+            /// <summary>
+            /// <see cref="HorizontalPercent"/> 是否来自可信读数（Word 文本区水平滚动条）。
+            /// <para>
+            /// 旧版文件没有这个字段（默认 false）：当时水平百分比取自 Word 的 UIA
+            /// <c>ScrollPattern.HorizontalScrollPercent</c>，而该横向读数不可靠（常报 0/NoScroll），
+            /// 恢复时把 0 回写进 Word 就会把横向滚动拉回首位。因此旧值一律不参与横向恢复。
+            /// </para>
+            /// </summary>
+            [Newtonsoft.Json.JsonProperty("horizontalPercentTrusted")]
+            public bool HorizontalPercentTrusted { get; set; }
 
             [Newtonsoft.Json.JsonProperty("updatedAt")]
             public string UpdatedAt { get; set; }
@@ -905,8 +1002,16 @@ namespace Ink_Canvas
 
             if (UILinkageScrollReader.TryGetScroll(textArea, UILinkageScrollReader.SB_VERT, out var v))
                 sb.AppendLine($"[Word 竖直滚动] 最小={v.Min} 总行={v.Max} 可见行={v.Page} 位置={v.Pos}");
-            if (UILinkageScrollReader.TryGetScroll(textArea, UILinkageScrollReader.SB_HORZ, out var h))
-                sb.AppendLine($"[Word 水平滚动] 最小={h.Min} 总列={h.Max} 可见列={h.Page} 位置={h.Pos}");
+
+            // 横向：连通／同步用的就是下面这一路读数（Word 的 ScrollPattern 横向不可靠，
+            // 上面的 [视口 滚动位置] H 常常是 —/0，而文档其实宽于视口）。
+            if (UILinkageScrollReader.TryGetWordHorizontalScroll(textArea, out var h))
+                sb.AppendLine($"[Word 水平滚动] 位置={h.Pos} 单位总数={h.Total} 视口单位={h.Page} "
+                    + $"可滚动上限={h.MaxPos} → {h.Pos * 100.0 / Math.Max(1, h.MaxPos):F1}%");
+            else if (UILinkageScrollReader.TryGetScroll(textArea, UILinkageScrollReader.SB_HORZ, out var h0))
+                sb.AppendLine($"[Word 水平滚动] 不可横向滚动（最小={h0.Min} 最大={h0.Max} 可见={h0.Page} 位置={h0.Pos}）");
+            else
+                sb.AppendLine("[Word 水平滚动] 读取失败");
         }
 
         /// <summary>
@@ -1282,6 +1387,8 @@ namespace Ink_Canvas
                 AssignUILinkageWindowSlot(inst);
                 // 新文档内容坐标系与旧帧无关：重置滚动帧，载入的内容锚定墨迹才能对齐。
                 inst.Canvas.ResetScrollFrame();
+                // 横向帧标定同理失效（页面版式/留白随文档变化）。
+                ResetUILinkageWordHorizontalFrame(inst);
                 // 形状识别缓冲绑定的是旧文档的笔迹引用与坐标，必须一并清空。
                 ResetUILinkageInkToShapeBuffer(inst);
                 // SumatraPDF：新文档布局不同，重新校准滚动单位。
@@ -1587,98 +1694,77 @@ namespace Ink_Canvas
             }
         }
 
-        /// <summary>独立画布与主画布共享批注栏状态（编辑模式 + 笔属性），但不共享墨迹。</summary>
+        /// <summary>
+        /// 卫星独立画布与主画布共享批注栏状态（编辑模式 + 笔属性），但不共享墨迹。
+        /// <para>
+        /// 「卫星画布」包含两类：UI 联动批注层（Word / SumatraPDF）与内置图片查看器画布。
+        /// 两者都由 <see cref="IndependentCanvasStateSync"/> 这一份实现驱动，
+        /// 因此「主工具栏批注时可以在卫星画布上书写」的行为完全一致。
+        /// </para>
+        /// </summary>
         private void SyncUILinkageCanvasState()
         {
             // 交互判定必须用逻辑工具（_currentToolMode）：原生笔模式物理 EditingMode 是 None，
-            // 若按物理模式判定会把独立画布错误禁用，书写落到主画布。
+            // 若按物理模式判定会把卫星画布错误禁用，书写落到主画布。
             var effectiveMode = GetUILinkageEffectiveEditingMode();
             bool interactive = effectiveMode != InkCanvasEditingMode.None;
+
+            var context = BuildIndependentCanvasSyncContext(effectiveMode, interactive);
 
             foreach (var inst in _uiLinkageInstances)
             {
                 if (inst?.Canvas == null) continue;
-
-                if (inkCanvas != null)
-                {
-                    if (inst.Canvas.InkSurface.EditingMode != effectiveMode)
-                        inst.Canvas.InkSurface.EditingMode = effectiveMode;
-
-                    var attrs = inkCanvas.DefaultDrawingAttributes;
-                    if (attrs != null)
-                    {
-                        // 整体克隆而不是白名单比对：荧光笔（IsHighlighter + StylusTip=Rectangle）、
-                        // IgnorePressure、FitToCurve、StylusTipTransform 都靠 DrawingAttributes 承载，
-                        // 只比 Color/Width/Height 会让独立画布永远停在默认的椭圆不透明硬笔上。
-                        // IsHighlighter 变化时 Color/Width/Height 往往不变，必须一并纳入判定。
-                        var cur = inst.Canvas.InkSurface.DefaultDrawingAttributes;
-                        if (cur == null || !DrawingAttributesEquivalent(cur, attrs))
-                            inst.Canvas.InkSurface.DefaultDrawingAttributes = attrs.Clone();
-                    }
-
-                    // 同步橡皮擦形状（面积擦/线擦在独立画布上使用原生 InkCanvas 擦除时需要一致形状）。
-                    inst.Canvas.InkSurface.EraserShape = inkCanvas.EraserShape;
-                }
-
-                if (inst.Canvas.IsHitTestVisible != interactive)
-                    inst.Canvas.IsHitTestVisible = interactive;
-
-                // 触摸抑制：多指手势结束时恢复到宿主当前的逻辑模式，而不是画布当时的物理模式
-                // （原生笔模式下物理模式是 None，照抄会把画布永久禁用）。
-                inst.Canvas.TouchUserEditingMode = interactive
-                    ? InkCanvasEditingMode.Ink
-                    : InkCanvasEditingMode.None;
-                inst.Canvas.TouchSuppressionEnabled = interactive;
-
-                // 手掌擦：与主画布共用同一套接触面积判定与设置（见 BuildPalmEraserPolicy）。
-                // 判定放在宿主这一侧（internal 的 PalmEraserPolicy / PalmEraserCalculator 不出圈），
-                // 独立画布只拿到一个「宽高 in、擦头宽度 out」的原始类型委托。
-                // isActive 传该画布自己的 IsPalmErasing：策略里的 IsActive 为真时
-                // Evaluate 走「已在擦除中」分支、不再返回 ActivatesEraser，
-                // 用错状态会让第二次落掌被误判成首次激活。
-                // 只在尚未挂接时创建一次委托，避免每 250ms 分配新闭包。
-                if (inst.Canvas.PalmContactClassifier == null)
-                {
-                    inst.Canvas.PalmContactClassifier = (double contactW, double contactH, out double eraserWidth) =>
-                    {
-                        eraserWidth = 0;
-                        var evaluation = Ink_Canvas.Ink.PalmEraserCalculator.Evaluate(
-                            contactW, contactH, BuildPalmEraserPolicy(inst.Canvas.IsPalmErasing));
-                        if (!evaluation.ActivatesEraser) return false;
-                        eraserWidth = evaluation.EraserWidthDip;
-                        return true;
-                    };
-                }
-
-                // 鼠标模式下暂停显示滚动条与撤销/恢复按钮（无法交互）。
-                inst.Canvas.SetScrollBarsSuppressed(!interactive);
+                IndependentCanvasStateSync.Apply(inst.Canvas, context);
             }
+
+            // 内置图片查看器：每张图片一块独立窗口里的画布，同样跟随主工具栏批注状态。
+            foreach (var canvas in Ink_Canvas.Windows.ImageViewerManager.OpenCanvases)
+                IndependentCanvasStateSync.Apply(canvas, context);
+
+            // 查看器底栏的「墨迹书写」按钮高亮（幂等，值未变时不做事）。
+            IndependentCanvasStateSync.NotifyAnnotationState(interactive);
         }
 
         /// <summary>
-        /// 两个 <see cref="DrawingAttributes"/> 是否在「影响绘制结果」的维度上等价。
-        /// 用于避免每拍（250ms）都克隆一次属性对象，同时保证荧光笔等属性变化能被察觉。
+        /// 立即把主工具栏的批注状态推给所有卫星独立画布（UI 联动批注层 + 内置图片查看器画布）。
+        /// <para>
+        /// 常规路径是 250ms 轮询（<c>EnsureUILinkageTimer</c> 的「状态同步」阶段），
+        /// 但工具切换、查看器底栏点「墨迹书写」之后必须立刻生效，否则用户会看到
+        /// 「点了批注却还要等一下才能写」的迟滞。
+        /// </para>
         /// </summary>
-        private static bool DrawingAttributesEquivalent(DrawingAttributes a, DrawingAttributes b)
+        internal void SyncSatelliteCanvasStateNow()
         {
-            if (ReferenceEquals(a, b)) return true;
-            if (a == null || b == null) return false;
-
-            return a.Color == b.Color
-                && a.Width == b.Width
-                && a.Height == b.Height
-                && a.StylusTip == b.StylusTip
-                && a.IsHighlighter == b.IsHighlighter
-                && a.IgnorePressure == b.IgnorePressure
-                && a.FitToCurve == b.FitToCurve
-                && StylusTipTransformEquals(a.StylusTipTransform, b.StylusTipTransform);
+            RunUILinkageStage("状态同步(立即)", SyncUILinkageCanvasState);
         }
 
-        private static bool StylusTipTransformEquals(Matrix a, Matrix b)
+        /// <summary>采集主画布侧的批注状态快照，供各卫星画布复用（避免每块画布各算一遍）。</summary>
+        private IndependentCanvasStateSync.Context BuildIndependentCanvasSyncContext(
+            InkCanvasEditingMode effectiveMode, bool interactive)
         {
-            return a.M11 == b.M11 && a.M12 == b.M12
-                && a.M21 == b.M21 && a.M22 == b.M22
-                && a.OffsetX == b.OffsetX && a.OffsetY == b.OffsetY;
+            var context = new IndependentCanvasStateSync.Context
+            {
+                EffectiveMode = effectiveMode,
+                Interactive = interactive,
+                EraserShape = inkCanvas?.EraserShape,
+                Attributes = inkCanvas?.DefaultDrawingAttributes,
+                // 手掌擦：与主画布共用同一套接触面积判定与设置（见 BuildPalmEraserPolicy）。
+                // 判定放在宿主这一侧（internal 的 PalmEraserPolicy / PalmEraserCalculator 不出圈），
+                // 卫星画布只拿到一个「宽高 in、擦头宽度 out」的原始类型委托。
+                // 闭包捕获画布本身，每次判定实时读取 canvas.IsPalmErasing，因此只需创建一次。
+                PalmClassifierFactory = canvas =>
+                    (double contactW, double contactH, out double eraserWidth) =>
+                    {
+                        eraserWidth = 0;
+                        var evaluation = Ink_Canvas.Ink.PalmEraserCalculator.Evaluate(
+                            contactW, contactH, BuildPalmEraserPolicy(canvas.IsPalmErasing));
+                        if (!evaluation.ActivatesEraser) return false;
+                        eraserWidth = evaluation.EraserWidthDip;
+                        return true;
+                    }
+            };
+
+            return context;
         }
 
         /// <summary>
@@ -1728,17 +1814,12 @@ namespace Ink_Canvas
                             inst.CanvasHwnd, effV, effH, out vp, out hp, out vs, out hs, out var pageUnitsV))
                     {
                         // 画布子窗口可能被重建（换文档/显示模式切换）：重找后再读一次。
-                        if (!EnsureUILinkageViewport(inst))
+                        // 两次都读不到也不再当场解绑：由下方的「连续失败计数」决定（见注释）。
+                        if (EnsureUILinkageViewport(inst))
                         {
-                            UnbindUILinkageInstance(inst);
-                            continue;
-                        }
-                        GetUILinkageSumatraEffUnits(inst, r, out effV, out effH);
-                        if (!UILinkageScrollReader.TryGetSumatraScrollPercents(
-                                inst.CanvasHwnd, effV, effH, out vp, out hp, out vs, out hs, out pageUnitsV))
-                        {
-                            UnbindUILinkageInstance(inst);
-                            continue;
+                            GetUILinkageSumatraEffUnits(inst, r, out effV, out effH);
+                            UILinkageScrollReader.TryGetSumatraScrollPercents(
+                                inst.CanvasHwnd, effV, effH, out vp, out hp, out vs, out hs, out pageUnitsV);
                         }
                     }
 
@@ -1748,28 +1829,79 @@ namespace Ink_Canvas
                 }
                 else
                 {
-                    if (!ReadWordScroll(inst.DocElement, out vp, out hp, out vs, out hs))
+                    if (!ReadWordScroll(inst.DocElement, out vp, out hp, out vs, out hs)
+                        && EnsureUILinkageViewport(inst))
                     {
-                        if (!EnsureUILinkageViewport(inst)
-                            || !ReadWordScroll(inst.DocElement, out vp, out hp, out vs, out hs))
-                        {
-                            UnbindUILinkageInstance(inst);
-                            continue;
-                        }
+                        ReadWordScroll(inst.DocElement, out vp, out hp, out vs, out hs);
                     }
                 }
 
-                if (double.IsNaN(vp) || double.IsNaN(hp)) continue;
+                // 读数失败（竖直轴为 NaN）：累计「连续」失败次数，达到上限才判定实例失效并解绑。
+                // 单次失败是常态（画布子窗口被重建、渲染线程尚未回写实际位置、切换显示模式），
+                // 历史实现单次失败即解绑，于是「解绑 → 下一拍重新绑定 → 绑定内同步端点校准
+                // （SB_BOTTOM + 最多 192 次阻塞 SendMessageTimeout，且发生在 UI 线程）→ 再读失败」
+                // 形成死循环：CPU 与交互线程同时被打满，PDF 还会被反复甩到文档末尾再拉回。
+                if (double.IsNaN(vp))
+                {
+                    if (++inst.ScrollReadFailureCount < UILinkageScrollReadFailureLimit) continue;
+                    UnbindUILinkageInstance(inst, captureLongScreenshot: false);
+                    continue;
+                }
+
+                inst.ScrollReadFailureCount = 0;
 
                 var dpi = VisualTreeHelper.GetDpi(this);
                 double viewW = r.Width / dpi.DpiScaleX;
                 double viewH = r.Height / dpi.DpiScaleY;
 
-                double extW = viewW * (hs > 0 && hs < 100 ? 100.0 / hs : 1.0);
-                double extH = viewH * (vs > 0 && vs < 100 ? 100.0 / vs : 1.0);
+                // 水平轴（Word）：以文本区（_WwG）水平滚动条为准。Word 的 ScrollPattern 横向读数
+                // 不可靠（文档宽于视口时也常报 NoScroll/0、ViewSize 报 100），沿用它推算会让横向偏移
+                // 恒为 0 —— 画面表现即「画布横向滚动条弹回首位、墨迹不随横向滚动」。
+                bool wordHFromBar = false;
+                double barOffsetX = 0, barExtW = 0, barHpPercent = double.NaN;
+                if (inst.Kind == UILinkageTargetKind.Word)
+                {
+                    wordHFromBar = TryReadUILinkageWordHorizontal(
+                        inst, r, dpi, viewW, out barOffsetX, out barExtW, out barHpPercent);
+                }
 
-                double offX = (hp / 100.0) * Math.Max(0, extW - viewW);
+                double extH = viewH * (vs > 0 && vs < 100 ? 100.0 / vs : 1.0);
                 double offY = (vp / 100.0) * Math.Max(0, extH - viewH);
+
+                double extW, offsetX, hpPercent;
+                if (wordHFromBar)
+                {
+                    // 滚动条读数自带位置与范围（同源同口径），不再叠加页面实测，避免两种口径互相打架。
+                    extW = Math.Max(viewW, barExtW);
+                    offsetX = barOffsetX;
+                    hpPercent = barHpPercent;
+                }
+                else if (inst.Kind == UILinkageTargetKind.Word
+                    && TryReadUILinkagePageLeftDip(inst, r, dpi, out double pageLeftDip))
+                {
+                    // 页面化视图：页宽适配视口时页面水平居中，居中留白只能由页面实测表达。
+                    extW = viewW * (hs > 0 && hs < 100 ? 100.0 / hs : 1.0);
+                    offsetX = -pageLeftDip;
+                    // 这一路没有可信的横向百分比（ScrollPattern 横向不可靠）→ 保持 NaN，
+                    // 滚动记忆据此判定「无可信读数」，绝不写成 0（0 会把 Word 横向拉回最左）。
+                    hpPercent = double.NaN;
+                }
+                else if (inst.Kind == UILinkageTargetKind.SumatraPdf && IsUILinkageValidPercent(hp))
+                {
+                    // 仅 SumatraPDF 用百分比推横向偏移（其百分比由 Win32 滚动条换算，可靠）。
+                    // Word 不再走这一路：其 ScrollPattern 横向读数不可靠（常报 NoScroll/0），
+                    // 用它推偏移正是「横向偏移恒为 0」的成因。
+                    extW = viewW * (hs > 0 && hs < 100 ? 100.0 / hs : 1.0);
+                    offsetX = hp / 100.0 * Math.Max(0, extW - viewW);
+                    hpPercent = hp;
+                }
+                else
+                {
+                    // 读数不可用：保持上一拍已应用的口径（停住），而不是塌回 0（弹回首位）。
+                    extW = Math.Max(viewW, inst.LastExtW);
+                    offsetX = inst.LastOffsetX;
+                    hpPercent = double.NaN;
+                }
 
                 // 缩放支持：读缩放指示，缩放变化时把墨迹按比例重缩放（锚定文档内容）。
                 // 必须在本轮 SetScrollInfo 之前执行，缩放锚点依赖当前已应用偏移。
@@ -1777,7 +1909,10 @@ namespace Ink_Canvas
                 // 用 nPage/视口像素比作度量（仅比值有意义）。
                 if (inst.Kind == UILinkageTargetKind.Word)
                 {
-                    HandleUILinkageZoomChange(inst, ReadUILinkageZoom(inst));
+                    // 缩放变化会改变页面居中留白（跨过「有无横向滚动条」的边界时尤其明显）：
+                    // 横向帧标定随之失效，重新标定（下一拍从当前读数取首帧）。
+                    if (!double.IsNaN(HandleUILinkageZoomChange(inst, ReadUILinkageZoom(inst))))
+                        ResetUILinkageWordHorizontalFrame(inst);
                 }
                 else
                 {
@@ -1792,21 +1927,9 @@ namespace Ink_Canvas
                     }
                 }
 
-                // 横向偏移：Word 页面化视图中，页宽适配视口时页面水平居中、超宽时贴左并出现
-                // 横向滚动条，ScrollPattern 的 hp 百分比无法表达居中位移——跨过「有无横向
-                // 滚动条」边界时墨迹会整体横移。Word 把当前页作为 Document 的 Custom 子元素
-                // （如「页面 1」）暴露，直接实测页面左缘的视口位移（居中/贴左/标尺占用全部
-                // 自动吸收），横向偏移取其相反数；读不到（草稿/Web 版式无页面元素）退回 hp 推算。
-                double offsetX = offX;
-                if (inst.Kind == UILinkageTargetKind.Word
-                    && TryReadUILinkagePageLeftDip(inst, r, dpi, out double pageLeftDip))
-                {
-                    offsetX = -pageLeftDip;
-                }
-
                 // 缓存本次读数，供滚动记忆与长截屏使用（LastOffsetX 为实际下发的有效偏移）。
                 inst.LastVpPercent = vp;
-                inst.LastHpPercent = hp;
+                inst.LastHpPercent = hpPercent;
                 inst.LastViewW = viewW;
                 inst.LastViewH = viewH;
                 inst.LastExtW = extW;
@@ -2036,6 +2159,162 @@ namespace Ink_Canvas
             return null;
         }
 
+        // ---------------- 横向滚动读数（Word：水平滚动条为准，页面实测只标定绝对帧） ----------------
+
+        /// <summary>滚动百分比是否可信（NaN / 无穷 / NoScroll(-1) / 越界一律视为不可信）。</summary>
+        private static bool IsUILinkageValidPercent(double value)
+            => !double.IsNaN(value) && !double.IsInfinity(value) && value >= 0 && value <= 100;
+
+        /// <summary>
+        /// 解析（并缓存）Word 文本区窗口句柄：句柄失效或冷却到期时重找。
+        /// 找不到返回 Zero（调用方退回页面实测 / ScrollPattern 推算）。
+        /// </summary>
+        private static IntPtr ResolveUILinkageWordTextArea(UILinkageCanvasInstance inst)
+        {
+            if (inst == null || inst.BoundHwnd == IntPtr.Zero) return IntPtr.Zero;
+
+            if (inst.WordTextAreaHwnd != IntPtr.Zero
+                && UILinkageWindowFinder.IsWindowAlive(inst.WordTextAreaHwnd))
+                return inst.WordTextAreaHwnd;
+
+            inst.WordTextAreaHwnd = IntPtr.Zero;
+
+            if (DateTime.UtcNow < inst.NextWordTextAreaFindUtc) return IntPtr.Zero;
+            inst.NextWordTextAreaFindUtc = DateTime.UtcNow + UILinkageWordTextAreaFindCooldown;
+
+            inst.WordTextAreaHwnd = UILinkageScrollReader.FindWordTextArea(inst.BoundHwnd);
+            return inst.WordTextAreaHwnd;
+        }
+
+        /// <summary>
+        /// 清空横向帧标定（Word 缩放变化、窗口换文档时调用）：下一拍从当前读数重新取首帧。
+        /// 页面居中留白是随缩放/版式变化的量，沿用旧标定会让墨迹整体横移一个留白宽度。
+        /// </summary>
+        private static void ResetUILinkageWordHorizontalFrame(UILinkageCanvasInstance inst)
+        {
+            if (inst == null) return;
+            inst.WordHorizontalFrameOffset = double.NaN;
+            inst.LastWordFrameSampleBarOffset = double.NaN;
+            inst.LastWordFrameSamplePageLeftDip = double.NaN;
+        }
+
+        /// <summary>
+        /// 读取 Word 水平轴状态：偏移（DIP）、内容总宽（DIP）、滚动百分比。
+        /// <para>
+        /// <b>为什么不能沿用它原来的读法</b>：原先横向偏移取自 UIA <c>ScrollPattern</c> 的
+        /// <c>HorizontalScrollPercent</c>/<c>HorizontalViewSize</c>，而 Word 这两个横向读数不可靠
+        /// —— 文档明明宽于视口时也常报 <c>NoScroll</c>（-1）或 0（ViewSize 报 100）。
+        /// 于是横向偏移恒为 0：独立画布横向滚动条弹回首位、墨迹不随 Word 横向滚动；
+        /// 拖动画布横向滚动条时又会把「算不出来的 0」回写进 Word，把 Word 也拉回最左。
+        /// </para>
+        /// <para>
+        /// 现在以文本区（<c>_WwG</c>）的水平滚动条为准：<c>nPos</c> 是位置、<c>nMax+1</c> 是内容总
+        /// 单位数、<c>nPage</c> 是视口单位数，三者同源同口径，换算 DIP 用「视口宽 / nPage」即可
+        /// （与单位本身是像素、缇还是列无关）；百分比按「位置 / 可滚动上限」换算，与
+        /// <c>ScrollPattern</c> 百分比同义，可直接回写 <c>SetScrollPercent</c>。
+        /// </para>
+        /// <para>
+        /// 绝对对齐（帧）仍沿用页面左缘实测：滚动条帧与页面帧只差一个常量（页面居中留白、
+        /// 桌面边距），标定后一直沿用；标定要求「页面实测确实与滚动条同步位移」，
+        /// 元素失效/被裁剪而返回旧矩形时保留旧标定 —— 位置始终由滚动条推进，不会停住也不会弹回。
+        /// <b>内容未超出视口</b>（不可横向滚动）时不采用滚动条读数：那时页面居中留白只能由
+        /// 页面实测表达，交由 <see cref="TryReadUILinkagePageLeftDip"/> 处理。
+        /// </para>
+        /// </summary>
+        private bool TryReadUILinkageWordHorizontal(
+            UILinkageCanvasInstance inst, Rect viewportRect, DpiScale dpi, double viewW,
+            out double offsetDip, out double extentDip, out double percent, bool calibrateFrame = true)
+        {
+            offsetDip = extentDip = 0;
+            percent = double.NaN;
+            if (inst == null || viewW <= 0 || viewportRect.IsEmpty) return false;
+
+            var textArea = ResolveUILinkageWordTextArea(inst);
+            if (textArea == IntPtr.Zero) return false;
+            if (!UILinkageScrollReader.TryGetWordHorizontalScroll(textArea, out var info)) return false;
+
+            int maxPos = info.MaxPos;
+            if (info.Page == 0 || maxPos <= 0) return false; // 不可横向滚动：交给页面实测帧
+
+            double dipPerUnit = viewW / info.Page; // 视口宽 = nPage 个单位
+            int pos = Math.Min(Math.Max(0, info.Pos - info.Min), maxPos);
+            double barOffset = pos * dipPerUnit;
+            extentDip = info.Total * dipPerUnit;
+            percent = Math.Min(100.0, Math.Max(0.0, pos * 100.0 / maxPos));
+
+            // 页面实测帧标定：只在该实测「确实跟着滚动条动」时才跟随，否则保留旧标定
+            // （位置始终由滚动条推进，页面读数失效/卡住都不会让墨迹停住或弹回）。
+            // calibrateFrame=false（拖动滚动条/点辅助按钮时的回写路径）跳过这次跨进程 UIA 读取：
+            // 那里只需要范围与百分比，不需要标定。
+            bool pageLeftReadable = false;
+            if (calibrateFrame)
+            {
+                pageLeftReadable = TryReadUILinkagePageLeftDip(inst, viewportRect, dpi, out double pageLeftDip);
+                if (pageLeftReadable)
+                {
+                    double rawFrame = -pageLeftDip - barOffset;
+
+                    // 页面实测与滚动条必须同步位移：滚动条动了而页面读数没动（被裁剪、元素失效、
+                    // 返回旧的常量矩形）说明这一路不可信 —— 此时若还跟随它，标定出的帧会把滚动
+                    // 位移整个抵消掉，表现为「墨迹不滚动」。
+                    bool trustworthy = true;
+                    if (!double.IsNaN(inst.LastWordFrameSampleBarOffset))
+                    {
+                        double barDelta = barOffset - inst.LastWordFrameSampleBarOffset;
+                        double pageDelta = -(pageLeftDip - inst.LastWordFrameSamplePageLeftDip);
+                        trustworthy = Math.Abs(barDelta) < 0.5
+                            || Math.Abs(pageDelta - barDelta) <= UILinkageWordHorizontalFrameToleranceDip;
+                    }
+
+                    inst.LastWordFrameSampleBarOffset = barOffset;
+                    inst.LastWordFrameSamplePageLeftDip = pageLeftDip;
+
+                    if (trustworthy
+                        && (double.IsNaN(inst.WordHorizontalFrameOffset)
+                            || Math.Abs(rawFrame - inst.WordHorizontalFrameOffset) <= UILinkageWordHorizontalFrameToleranceDip))
+                        inst.WordHorizontalFrameOffset = rawFrame;
+                }
+            }
+
+            double frame = double.IsNaN(inst.WordHorizontalFrameOffset) ? 0 : inst.WordHorizontalFrameOffset;
+            offsetDip = barOffset + frame;
+
+            if (calibrateFrame)
+                TraceUILinkageWordHorizontal(inst, info, pageLeftReadable, barOffset, extentDip, percent, offsetDip);
+            return true;
+        }
+
+        /// <summary>
+        /// 横向读数诊断日志：只在「读数形态」变化时写（来源、页面实测是否可读、帧标定是否跳变），
+        /// 且受 <see cref="UILinkageWordHorizontalTraceInterval"/> 节流。
+        /// 横向行为异常时（弹回首位 / 墨迹不跟随）这条日志能直接指出是哪一路读数不成立。
+        /// </summary>
+        private static void TraceUILinkageWordHorizontal(
+            UILinkageCanvasInstance inst, UILinkageScrollReader.RawScrollInfo info,
+            bool pageLeftReadable, double barOffset, double extentDip, double percent, double offsetDip)
+        {
+            try
+            {
+                double frame = double.IsNaN(inst.WordHorizontalFrameOffset) ? 0 : inst.WordHorizontalFrameOffset;
+                string key = $"{info.Pos}/{info.Total}/{info.Page}|{pageLeftReadable}|{frame:F1}|{inst.LastPageLeftDip:F1}";
+                if (string.Equals(key, inst.LastWordHorizontalTraceKey, StringComparison.Ordinal)) return;
+                if (DateTime.UtcNow - inst.LastWordHorizontalTraceUtc < UILinkageWordHorizontalTraceInterval) return;
+
+                inst.LastWordHorizontalTraceKey = key;
+                inst.LastWordHorizontalTraceUtc = DateTime.UtcNow;
+
+                LogHelper.WriteLogToFile(
+                    $"UI联动横向读数 | 滚动条 pos={info.Pos} 总数={info.Total} 视口={info.Page} → {percent:F1}%"
+                    + $"（偏移 {barOffset:F0}dp、内容宽 {extentDip:F0}dp）；页面实测={(pageLeftReadable ? $"{inst.LastPageLeftDip:F0}dp" : "不可读")}"
+                    + $"；帧标定={frame:F0}dp → 实际偏移 {offsetDip:F0}dp",
+                    LogHelper.LogType.Trace);
+            }
+            catch
+            {
+                // 诊断日志失败不影响滚动同步。
+            }
+        }
+
         /// <summary>
         /// 轮询刷新各实例独立画布的位置/尺寸（跟随目标组件移动）、窗口最小化隐藏、
         /// 遮挡裁切，以及同窗口文档切换检测（标题变化时保存并重载墨迹，避免串笔迹）。
@@ -2096,6 +2375,8 @@ namespace Ink_Canvas
                     AssignUILinkageWindowSlot(inst);
                     // 新文档内容坐标系与旧帧无关：重置滚动帧，载入的内容锚定墨迹才能对齐。
                     inst.Canvas.ResetScrollFrame();
+                    // 横向帧标定同理失效（页面版式/留白随文档变化）。
+                    ResetUILinkageWordHorizontalFrame(inst);
                     ResetUILinkageInkToShapeBuffer(inst);
                     // SumatraPDF：新文档布局不同，重新校准滚动单位（端点往返发生在换档瞬间）。
                     if (inst.Kind == UILinkageTargetKind.SumatraPdf)
@@ -2138,6 +2419,21 @@ namespace Ink_Canvas
             var selfHwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
             var occluded = UILinkageWindowFinder.GetOccludedRects(inst.BoundHwnd, selfHwnd, screenRect);
 
+            // 视口矩形、DPI 与遮挡集合都与上一拍完全一致：不重建几何、不重新赋值 OpacityMask。
+            // 无条件下写会让整块画布失效重绘 —— 目标窗口最大化时该画布即整屏，且 Z 序上任何一个
+            // 置顶窗口（自动隐藏任务栏的可见边条、其它程序的悬浮窗）都会让这里每 250ms 重建一次，
+            // 表现为「识别成功 + 最大化后 ICCCE 的 CPU 猛然升高」。
+            if (inst.LastClipViewportRect == screenRect
+                && inst.LastClipDpiScaleX == dpi.DpiScaleX
+                && inst.LastClipDpiScaleY == dpi.DpiScaleY
+                && OccludedRectsEqual(inst.LastClipOccludedRects, occluded))
+                return;
+
+            inst.LastClipViewportRect = screenRect;
+            inst.LastClipDpiScaleX = dpi.DpiScaleX;
+            inst.LastClipDpiScaleY = dpi.DpiScaleY;
+            inst.LastClipOccludedRects = occluded;
+
             if (occluded.Count == 0)
             {
                 inst.Canvas.SetClip(null);
@@ -2161,6 +2457,23 @@ namespace Ink_Canvas
             }
 
             inst.Canvas.SetClip(visible);
+        }
+
+        /// <summary>
+        /// 两组遮挡矩形是否等价（顺序敏感；<see cref="UILinkageWindowFinder.GetOccludedRects"/> 的
+        /// Z 序遍历顺序在同一窗口布局下稳定，矩形值来自 <c>GetWindowRect</c> 的整数，可精确比较）。
+        /// </summary>
+        private static bool OccludedRectsEqual(List<Rect> a, List<Rect> b)
+        {
+            if (ReferenceEquals(a, b)) return true;
+            if (a == null || b == null) return false;
+            if (a.Count != b.Count) return false;
+
+            for (int i = 0; i < a.Count; i++)
+            {
+                if (a[i] != b[i]) return false;
+            }
+            return true;
         }
 
         /// <summary>用户拖动独立画布滚动条：把目标像素偏移换算为滚动百分比，下发到目标应用真实滚动。</summary>
@@ -2199,12 +2512,20 @@ namespace Ink_Canvas
                 if (orientation == Orientation.Vertical)
                 {
                     double scrollable = extH - viewH;
-                    vpTarget = scrollable > 0 ? Math.Min(100.0, Math.Max(0.0, value / scrollable * 100.0)) : 0.0;
+                    // 算不出可滚动范围就不下发该轴（NoScroll）：下发 0 会把目标应用拉到最顶。
+                    if (scrollable > 0)
+                        vpTarget = Math.Min(100.0, Math.Max(0.0, value / scrollable * 100.0));
                 }
                 else
                 {
-                    double scrollable = extW - viewW;
-                    hpTarget = scrollable > 0 ? Math.Min(100.0, Math.Max(0.0, value / scrollable * 100.0)) : 0.0;
+                    // Word 的横向范围要用文本区水平滚动条读数（ScrollPattern 横向不可靠，会把范围算成 0）。
+                    if (TryResolveUILinkageHorizontalTarget(
+                            inst, r, dpi, viewW, extW, hp, out double extWTarget, out _))
+                    {
+                        double scrollable = extWTarget - viewW;
+                        if (scrollable > 0)
+                            hpTarget = Math.Min(100.0, Math.Max(0.0, value / scrollable * 100.0));
+                    }
                 }
 
                 ApplyUILinkageScrollPercent(inst, orientation, hpTarget, vpTarget, r);
@@ -2258,11 +2579,16 @@ namespace Ink_Canvas
                 }
                 else
                 {
-                    if (double.IsNaN(hp)) return;
-                    double extW = viewW * (hs > 0 && hs < 100 ? 100.0 / hs : 1.0);
+                    // 横向：Word 的位置与范围都取文本区水平滚动条读数（ScrollPattern 横向不可靠）。
+                    // 取不到可信口径就直接 return —— 绝不能回写 0，那会把 Word 横向拉回最左。
+                    if (!TryResolveUILinkageHorizontalTarget(
+                            inst, r, dpi, viewW, viewW * (hs > 0 && hs < 100 ? 100.0 / hs : 1.0), hp,
+                            out double extW, out double hpCurrent))
+                        return;
+
                     double scrollable = Math.Max(0, extW - viewW);
                     if (scrollable <= 0) return;
-                    double value = hp / 100.0 * scrollable + delta;
+                    double value = hpCurrent / 100.0 * scrollable + delta;
                     hpTarget = Math.Min(100.0, Math.Max(0.0, value / scrollable * 100.0));
                 }
 
@@ -2272,6 +2598,38 @@ namespace Ink_Canvas
             {
                 LogHelper.WriteLogToFile($"UI联动滚动辅助失败: {ex.Message}", LogHelper.LogType.Warning);
             }
+        }
+
+        /// <summary>
+        /// 解析「回写目标应用」用的水平轴口径：内容总宽（DIP）与当前横向百分比。
+        /// <para>
+        /// Word <b>只认文本区（_WwG）水平滚动条读数</b>：其 UIA ScrollPattern 的横向范围/百分比
+        /// 不可靠（文档宽于视口时也常报 <c>HorizontalViewSize=100</c>、<c>HorizontalScrollPercent=0</c>），
+        /// 采信它就会算出 <c>scrollable = 0</c> 并把兜底的 <b>0</b> 回写进 Word ——
+        /// 0 表示「横向滚到最左」，正是「外部滚动条回到首位」的成因。因此取不到滚动条读数时
+        /// 直接返回 false，调用方放弃该轴（传 <see cref="ScrollPattern.NoScroll"/>）而不是退化成 0。
+        /// </para>
+        /// SumatraPDF 用调用方算好的百分比（其值由 Win32 滚动条换算，可靠）。
+        /// </summary>
+        private bool TryResolveUILinkageHorizontalTarget(
+            UILinkageCanvasInstance inst, Rect viewportRect, DpiScale dpi, double viewW,
+            double fallbackExtW, double fallbackPercent,
+            out double extW, out double percent)
+        {
+            extW = fallbackExtW > viewW ? fallbackExtW : viewW;
+            percent = fallbackPercent;
+
+            if (inst?.Kind != UILinkageTargetKind.Word)
+                return IsUILinkageValidPercent(percent);
+
+            if (!TryReadUILinkageWordHorizontal(
+                    inst, viewportRect, dpi, viewW, out _, out double barExtW, out double barPercent,
+                    calibrateFrame: false))
+                return false;
+
+            extW = Math.Max(viewW, barExtW);
+            percent = barPercent;
+            return true;
         }
 
         /// <summary>
@@ -2430,7 +2788,12 @@ namespace Ink_Canvas
                 var state = new UILinkageScrollState
                 {
                     VerticalPercent = inst.LastVpPercent,
-                    HorizontalPercent = double.IsNaN(inst.LastHpPercent) ? 0 : inst.LastHpPercent,
+                    // 水平读数未知时保持 NaN（序列化为 NaN，读回来仍是 NaN）——绝不写成 0：
+                    // 0 在恢复时表示「滚到最左」，会把 Word 横向拉回首位（历史缺陷的成因之一）。
+                    HorizontalPercent = inst.LastHpPercent,
+                    // 只有来自可信横向读数（Word 文本区水平滚动条）的百分比才允许用于恢复；
+                    // 旧版文件没有这个标记，其水平值来自当时不可靠的 ScrollPattern 横向读数，一律不恢复。
+                    HorizontalPercentTrusted = IsUILinkageValidPercent(inst.LastHpPercent),
                     ZoomPercent = inst.LastZoomPercent,
                     UpdatedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
                 };
@@ -2465,7 +2828,12 @@ namespace Ink_Canvas
                 if (state == null || double.IsNaN(state.VerticalPercent)) return;
 
                 double vp = Math.Min(100.0, Math.Max(0.0, state.VerticalPercent));
-                double hp = Math.Min(100.0, Math.Max(0.0, state.HorizontalPercent));
+                // 横向：只有「带可信标记 + 百分比合法」才恢复，否则该轴不动。
+                // 这里绝不能退化成 0 —— 0 表示「滚到最左」，会把目标应用横向拉回首位
+                //（历史实现把「读不到」写成 0，恢复时正表现为外部滚动条回到首位）。
+                double? hp = state.HorizontalPercentTrusted && IsUILinkageValidPercent(state.HorizontalPercent)
+                    ? Math.Min(100.0, Math.Max(0.0, state.HorizontalPercent))
+                    : (double?)null;
 
                 if (inst.Kind == UILinkageTargetKind.SumatraPdf)
                 {
@@ -2490,6 +2858,7 @@ namespace Ink_Canvas
                 }
 
                 var docEl = inst.DocElement;
+                double hpWord = hp ?? ScrollPattern.NoScroll;
 
                 _ = Task.Run(async () =>
                 {
@@ -2499,7 +2868,7 @@ namespace Ink_Canvas
                         {
                             if (docEl.TryGetCurrentPattern(ScrollPattern.Pattern, out var p) && p is ScrollPattern sp)
                             {
-                                sp.SetScrollPercent(hp, vp);
+                                sp.SetScrollPercent(hpWord, vp);
                                 return;
                             }
                         }

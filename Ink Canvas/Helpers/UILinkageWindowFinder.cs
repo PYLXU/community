@@ -208,10 +208,16 @@ namespace Ink_Canvas.Helpers
                     uint pid = 0;
                     GetWindowThreadProcessId(hwnd, out pid);
 
-                    if (pid != 0 && pid != selfPid
-                        && IsWindowEffectivelyVisible(hwnd, treatClickThroughAsInvisible: true))
+                    if (pid != 0 && pid != selfPid)
                     {
-                        if (GetWindowRect(hwnd, out var r))
+                        // 先用 GetWindowRect 做矩形粗筛，再做可见性判定：
+                        // IsWindowEffectivelyVisible 内含 DwmGetWindowAttribute（到 DWM 的跨进程调用），
+                        // 而本方法由 250ms 轮询每拍调用、Z 序上多数窗口与目标并不相交。
+                        // 粗筛后只对真正相交的少数窗口做昂贵判定，结果与逐窗口判定完全一致。
+                        if (GetWindowRect(hwnd, out var r)
+                            && r.Right > targetLeft && r.Left < targetRight
+                            && r.Bottom > targetTop && r.Top < targetBottom
+                            && IsWindowEffectivelyVisible(hwnd, treatClickThroughAsInvisible: true))
                         {
                             int w = r.Right - r.Left;
                             int h = r.Bottom - r.Top;

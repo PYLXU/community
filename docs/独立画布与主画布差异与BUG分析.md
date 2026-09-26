@@ -843,3 +843,86 @@ MW_UILinkageWatch.cs(73,96): error CS0117: "UILinkageStrings"未包含"DebugNoCa
   `Ink\EraserContactSizing.cs`（手掌擦共用算法）。
 * **构建**：`dotnet build "Ink Canvas\InkCanvasForClass.csproj" -c Debug -p:Platform=x64` → 0 错误 0 警告。
 * **未做**：运行时 UI 验证（需真实 Word / SumatraPDF 与触屏设备）。
+
+---
+
+## 10. Word 横向滚动读数修复（本轮）
+
+> 症状（用户报告）：**Word 视口横向滚动的读取有误** —— 滚动位置「可以置入」Word，
+> 但独立画布（向外延伸）的横向滚动条会**回到首位**，且**墨迹不随横向滚动**。
+
+### 10.1 根因：横向只有一路不可靠的来源
+
+横向偏移原先只取自 UIA `ScrollPattern` 的 `HorizontalScrollPercent`/`HorizontalViewSize`
+（`UpdateUILinkageScrollSync` 里的 `offX`/`extW`）。Word 这两个横向读数不可靠 ——
+文档明明宽于视口时也常报 `NoScroll`（-1）或 0，`HorizontalViewSize` 报 100。于是：
+
+1. `extW = viewW * 100 / hs` 在 `hs >= 100` 时退化成 `viewW` → 画布横向滚动条 `Maximum = 0`
+   → 滑块恒在最左（**回到首位**）、横向辅助按钮不可用；
+2. `offX = hp/100 * (extW − viewW) = 0` → 每拍 `SetScrollInfo` 把横向偏移写回 0
+   → **墨迹不随横向滚动**，已被拖出的位置被弹回；
+3. 拖动画布横向滚动条 / 点辅助按钮时，`scrollable <= 0` 分支把 `hpTarget` 兜底成 **0**
+   并真的下发（`sp.SetScrollPercent(0, …)`）→ **连 Word 自己也被拉回最左**；
+4. 滚动记忆把「读不到」写成 `0`（`IsNaN ? 0 : hp`），恢复时 `SetScrollPercent(0, vp)`
+   再次把 Word 横向拉回首位。
+
+原有唯一可靠的一路是「页面左缘实测」（`TryReadUILinkagePageLeftDip`），但它只修正 `offsetX`：
+既不决定 `extW`（滚动条范围），在草稿/Web 版式（无页面元素）时也不可用。
+
+### 10.2 修复：横向以文本区水平滚动条为准
+
+横向改用 **文本区（`_WwG`）的水平滚动条**（`GetScrollInfo(SB_HORZ)`，与竖直轴同一套 Win32 通路，
+此前只用于调试面板输出）：
+
+| 量 | 取法 | 说明 |
+|---|---|---|
+| 位置 | `nPos − nMin` | 内容单位，与滚动条同口径 |
+| 内容总单位数 | `nMax − nMin + 1` | 换算 DIP 用「视口宽 / nPage」，与单位是像素/缇/列无关 |
+| 视口单位数 | `nPage` | |
+| 百分比 | `pos / (total − nPage) × 100` | 与 `ScrollPattern` 百分比同义，可直接回写 `SetScrollPercent` |
+
+* 新增 `UILinkageScrollReader.TryGetWordHorizontalScroll`（并为 `RawScrollInfo` 补 `Total`/`MaxPos`）；
+* `MW_UILinkage` 新增 `TryReadUILinkageWordHorizontal`：位置取滚动条，**绝对对齐（帧）仍沿用页面左缘实测**
+  —— 两者只差一个常量（页面居中留白、桌面边距），首帧标定后沿用
+  （`WordHorizontalFrameOffset`；页面帧跳变超过 `UILinkageWordHorizontalFrameToleranceDip` 时保留旧值）。
+  这样即使页面实测元素失效/被裁剪，位置仍由滚动条推进，不会停住也不再弹回；
+* 三路优先级：**滚动条（可横向滚动时）→ 页面左缘实测（居中态）→ 保持上一拍已应用的口径**
+  （`LastOffsetX`/`LastExtW`）。Word 不再退回 `ScrollPattern` 推算横向偏移 —— 那正是「恒为 0」的来源；
+  SumatraPDF 仍走它的百分比（由 Win32 滚动条换算，可靠）；
+* 帧标定只在「页面实测确实与滚动条同步位移」时跟随（`LastWordFrameSampleBarOffset`/`...PageLeftDip`
+  的增量比对），页面读数卡住时保留旧标定 —— 否则标定会把滚动位移整个抵消掉（「墨迹不滚动」的另一种成因）；
+  缩放变化与换文档都清空标定（页面留白随版式变化）；
+* 回写 Word 的水平目标同样只认滚动条读数：取不到就**不动该轴**（`NoScroll`），不再退回 ScrollPattern 百分比；
+* 「不可横向滚动」（`nPage == 0` 或范围退化）时不采用滚动条读数，交由页面实测表达居中留白；
+* `_WwG` 句柄按实例缓存 + 2s 冷却重找（避免每拍枚举子窗口）。
+
+### 10.3 顺带修掉的「回写 0」缺陷
+
+| 位置 | 原行为 | 现行为 |
+|---|---|---|
+| `OnUILinkageCanvasUserScroll` | 算不出范围时 `hpTarget = 0` 并下发 | 该轴传 `NoScroll`（不动） |
+| `OnUILinkageCanvasScrollStep` | 横向用 `ScrollPattern` 的范围与当前位置 | 同一路滚动条读数；取不到就 `return` |
+| `SaveUILinkageScrollPosition` | `IsNaN ? 0 : hp` | 保持 NaN，并记 `horizontalPercentTrusted` |
+| `RestoreUILinkageScrollPosition` | `Math.Max(0, NaN)` → 下发 | 不可信/非法 → `NoScroll`；旧版文件（无标记）一律按不可信处理，见 §10.1-4 |
+
+### 10.4 诊断（实机验证时先看这两处）
+
+* 调试面板 `[Word 水平滚动]` 行现在直接给出 `位置 / 单位总数 / 视口单位 / 可滚动上限 → 百分比`，
+  可与上一行 `[视口 滚动位置] H:…`（ScrollPattern）对照：两者不一致即证实横向读数不可靠。
+* 日志（`Trace` 级）新增 `UI联动横向读数 | …`：仅在读数形态变化时写、2s 节流，
+  输出滚动条位置、页面实测是否可读、帧标定值与最终偏移。
+
+### 10.5 验证与残留
+
+* **构建**：`dotnet build "Ink Canvas\InkCanvasForClass.csproj" -c Debug -p:Platform=x64` → 0 错误 0 警告。
+  `-p:Platform=AnyCPU` 的**编译**同样通过；若此时正在运行 `bin\Debug\AnyCPU` 下的程序，
+  输出文件被占用，末尾的复制步骤会以 MSB3026/MSB3027 失败（关掉程序后重新构建即可）。
+* **未做**：真实 Word 的运行时验证。若仍异常，按 §10.4 分两种情况：
+  * `[Word 水平滚动]` 报「不可横向滚动 / 读取失败」→ `_WwG` 的水平滚动条未暴露范围
+    （overlay 滚动条等），退化为页面实测帧；
+  * 日志中 `页面实测=不可读` 且帧标定从未建立 → 页面元素不成立（草稿/Web 版式），
+    横向只能依赖滚动条帧，可能整体差一个未知的桌面边距。
+* **残留**：回写 Word 时假定「滚动条百分比 ≡ `ScrollPattern` 百分比」（两者都是 0..100 的滚动范围占比）。
+  若某版本 Word 两者口径不同，表现为「拖动画布横向滚动条落点不精确」，但墨迹仍严格跟随实际滚动
+  （画布偏移取的是滚动条实测位置，不再依赖回写结果）。
+

@@ -1,8 +1,10 @@
 using Ink_Canvas.Properties;
 using Microsoft.Win32;
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Security;
 using System.Text;
 using System.Threading;
@@ -36,6 +38,68 @@ namespace Ink_Canvas.Helpers
         private const string PluginIdRegistryValueName = "InkCanvasPluginId";
 
         private const int IpcTimeout = 5000; // 5秒超时
+
+        // ---------------- 内置图片查看器（文件关联）相关的常量 ----------------
+
+        /// <summary>
+        /// 内置图片查看器所有图片格式共用的 ProgId。多个扩展名指向同一个 ProgId 是合法且常见的做法，
+        /// 打开命令统一带 <see cref="ImageViewerCommandLineSwitch"/> 开关，宿主据此分流到图片查看器。
+        /// </summary>
+        public const string ImageViewerProgId = "InkCanvasImageViewer";
+
+        /// <summary>
+        /// 双击图片时交给宿主的命令行开关。注册表写入形如 <c>"InkCanvasForClass.exe" -image "%1"</c>。
+        /// </summary>
+        public const string ImageViewerCommandLineSwitch = "-image";
+
+        /// <summary>
+        /// 图片查看器的 AppUserModelID —— 单独一套，与主程序（<c>InkCanvasForClass.CE</c>）分开：
+        /// 任务栏把查看器与其它 ICC 窗口（例如设置窗口）分别归组，各自有各自的图标与预览。
+        /// </summary>
+        public const string ImageViewerAppUserModelId = "InkCanvasForClass.CE.ImageViewer";
+
+        /// <summary>图片查看器文件关联的 IPC 文件前缀（已运行实例接收图片路径用）。</summary>
+        private const string IpcImageViewerFilePrefix = "InkCanvasImageViewerFile_";
+
+        /// <summary>
+        /// 图片查看器的展示名（"Ink Canvas 图片查看器"）。
+        /// 用于资源管理器「打开方式」列表里显示的应用名。
+        /// </summary>
+        public static string ImageViewerAppDisplayName
+            => Ink_Canvas.Windows.SettingsViews.Helpers.UriSchemeShortcutHelper.ImageViewerDisplayName;
+
+        /// <summary>
+        /// 图片查看器专属图标（.ico）路径 —— 与「创建快捷方式」用的是同一个图标生成器，
+        /// 只是程序内图标换成图片查看器图标。生成失败返回 null，调用方回退到主程序 exe 图标。
+        /// <para>
+        /// 进程内只生成一次：一次「写入关联」要为每个绑定格式各写一遍注册表，
+        /// 不缓存就会把同一个文件反复重绘、重写十几遍。
+        /// </para>
+        /// </summary>
+        public static string GetImageViewerIconPath()
+        {
+            if (_imageViewerIconResolved) return _cachedImageViewerIconPath;
+            _imageViewerIconResolved = true;
+
+            try
+            {
+                _cachedImageViewerIconPath = Ink_Canvas.Windows.SettingsViews.Helpers.UriSchemeShortcutHelper.EnsureImageViewerIconFile();
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"生成图片查看器图标失败: {ex.Message}", LogHelper.LogType.Warning);
+                _cachedImageViewerIconPath = null;
+            }
+
+            return _cachedImageViewerIconPath;
+        }
+
+        private static string _cachedImageViewerIconPath;
+        private static bool _imageViewerIconResolved;
+
+        /// <summary>DefaultIcon 的注册表值：有专属图标就用它，否则退回 exe 图标。</summary>
+        private static string BuildImageViewerIconValue(string exePath, string iconPath)
+            => string.IsNullOrEmpty(iconPath) ? $"\"{exePath}\",0" : $"\"{iconPath}\",0";
 
         /// <summary>
         /// 注册.icstk文件关联
@@ -359,6 +423,458 @@ namespace Ink_Canvas.Helpers
             }
 
             return false;
+        }
+
+        #endregion
+
+        #region 内置图片查看器文件关联
+
+        /// <summary>当前进程的可执行文件全路径。</summary>
+        private static string CurrentExecutablePath()
+            => Process.GetCurrentProcess().MainModule.FileName;
+
+        /// <summary>当前进程的可执行文件名（用于 <c>HKCU\Software\Classes\Applications\&lt;exe&gt;</c> 键）。</summary>
+        private static string CurrentExecutableFileName()
+            => Path.GetFileName(CurrentExecutablePath());
+
+        /// <summary><c>HKCU\Software\Classes\Applications\&lt;exe&gt;</c> 键的完整路径。</summary>
+        private static string ImageViewerApplicationKeyPath
+            => @"Software\Classes\Applications\" + CurrentExecutableFileName();
+
+        /// <summary>
+        /// 登记「本程序可以被用来打开图片」这一事实（不针对具体扩展名）：
+        /// <list type="bullet">
+        /// <item><c>HKCU\Software\Classes\Applications\&lt;exe&gt;</c> —— 让本程序出现在
+        /// 「打开方式 → 选择其他应用」列表中；</item>
+        /// <item><c>shell\open\command</c> 带 <see cref="ImageViewerCommandLineSwitch"/> 开关，
+        /// 双击图片时宿主能直接分流到图片查看器；</item>
+        /// <item><c>SupportedTypes</c> —— 声明本程序支持的扩展名集合（Windows 据此在
+        /// 文件属性「打开方式」里提供本程序）。</item>
+        /// </list>
+        /// 全部写入 HKCU，无需管理员权限。
+        /// </summary>
+        /// <param name="extensions">要声明的扩展名集合（可带或不带点）。</param>
+        /// <returns>是否写入成功。</returns>
+        public static bool RegisterImageViewerApplication(IEnumerable<string> extensions)
+        {
+            try
+            {
+                string exePath = CurrentExecutablePath();
+                string iconValue = BuildImageViewerIconValue(exePath, GetImageViewerIconPath());
+
+                using (RegistryKey appKey = Registry.CurrentUser.CreateSubKey(ImageViewerApplicationKeyPath))
+                {
+                    if (appKey == null) return false;
+
+                    // FriendlyAppName 就是资源管理器「打开方式」列表里显示的名字。
+                    appKey.SetValue("FriendlyAppName", ImageViewerAppDisplayName);
+                    appKey.SetValue("ApplicationName", ImageViewerAppDisplayName);
+                    appKey.SetValue("ApplicationIcon", iconValue);
+                    appKey.SetValue("AppUserModelID", ImageViewerAppUserModelId);
+
+                    using (RegistryKey iconKey = appKey.CreateSubKey("DefaultIcon"))
+                    {
+                        iconKey?.SetValue("", iconValue);
+                    }
+
+                    using (RegistryKey commandKey = appKey.CreateSubKey(@"shell\open\command"))
+                    {
+                        commandKey?.SetValue("", $"\"{exePath}\" {ImageViewerCommandLineSwitch} \"%1\"");
+                    }
+
+                    using (RegistryKey supportedKey = appKey.CreateSubKey("SupportedTypes"))
+                    {
+                        if (supportedKey != null)
+                        {
+                            foreach (var raw in extensions ?? Enumerable.Empty<string>())
+                            {
+                                string extension = NormalizeExtension(raw);
+                                if (extension.Length <= 1) continue;
+                                supportedKey.SetValue(extension, string.Empty, RegistryValueKind.String);
+                            }
+                        }
+                    }
+                }
+
+                LogHelper.WriteLogToFile(
+                    $"已登记图片查看器应用条目（{CurrentExecutableFileName()}）", LogHelper.LogType.Event);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"登记图片查看器应用条目失败: {ex.Message}", LogHelper.LogType.Error);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 为一个图片扩展名注册「打开方式」关联：
+        /// <list type="number">
+        /// <item>写 <c>HKCU\Software\Classes\&lt;ProgId&gt;</c> 文件类型定义（描述 / 图标 / 打开命令）；</item>
+        /// <item>把 ProgId 追加到 <c>HKCU\Software\Classes\&lt;.ext&gt;\OpenWithProgids</c>，
+        /// 使其出现在右键「打开方式」列表中。</item>
+        /// </list>
+        /// <b>不</b>改写扩展名的默认处理程序 —— Windows 的默认应用由 <c>UserChoice</c> 保护，
+        /// 程序无法静默修改；需要设为默认时由 <see cref="OpenDefaultAppsSettings"/> 引导用户去系统设置确认。
+        /// </summary>
+        /// <param name="extension">图片扩展名（可带或不带点）。</param>
+        /// <param name="displayName">文件类型显示名（用于 FriendlyTypeName），可为空。</param>
+        /// <returns>是否注册成功。</returns>
+        public static bool RegisterImageViewerAssociation(string extension, string displayName = null)
+        {
+            try
+            {
+                string ext = NormalizeExtension(extension);
+                if (ext.Length <= 1) return false;
+                if (IsProtectedExtension(ext)) return false;
+
+                string exePath = CurrentExecutablePath();
+                string iconValue = BuildImageViewerIconValue(exePath, GetImageViewerIconPath());
+                string description = string.IsNullOrWhiteSpace(displayName)
+                    ? $"{ext.TrimStart('.').ToUpperInvariant()} 图片"
+                    : displayName.Trim();
+
+                using (RegistryKey fileTypeKey = Registry.CurrentUser.CreateSubKey(@"Software\Classes\" + ImageViewerProgId))
+                {
+                    if (fileTypeKey == null) return false;
+
+                    fileTypeKey.SetValue("", description);
+                    fileTypeKey.SetValue("FriendlyTypeName", description);
+
+                    using (RegistryKey iconKey = fileTypeKey.CreateSubKey("DefaultIcon"))
+                    {
+                        iconKey?.SetValue("", iconValue);
+                    }
+
+                    using (RegistryKey commandKey = fileTypeKey.CreateSubKey(@"shell\open\command"))
+                    {
+                        commandKey?.SetValue("", $"\"{exePath}\" {ImageViewerCommandLineSwitch} \"%1\"");
+                    }
+
+                    // 宿主自身处理该扩展名，不归属任何插件：清掉可能残留的插件归属标记。
+                    using (RegistryKey extKey0 = Registry.CurrentUser.OpenSubKey(@"Software\Classes\" + ext, true))
+                    {
+                        extKey0?.DeleteValue(PluginIdRegistryValueName, false);
+                    }
+                }
+
+                using (RegistryKey extensionKey = Registry.CurrentUser.CreateSubKey(@"Software\Classes\" + ext))
+                {
+                    if (extensionKey == null) return false;
+
+                    using (RegistryKey openWithKey = extensionKey.CreateSubKey("OpenWithProgids"))
+                    {
+                        // REG_NONE + 空数据是「出现在打开方式列表」的标准写法。
+                        openWithKey?.SetValue(ImageViewerProgId, new byte[0], RegistryValueKind.None);
+                    }
+                }
+
+                LogHelper.WriteLogToFile($"已注册图片格式关联: {ext}（ProgId: {ImageViewerProgId}）", LogHelper.LogType.Event);
+                return true;
+            }
+            catch (SecurityException ex)
+            {
+                LogHelper.WriteLogToFile($"注册图片格式关联时权限不足（{extension}）: {ex.Message}", LogHelper.LogType.Error);
+                return false;
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"注册图片格式关联失败（{extension}）: {ex.Message}", LogHelper.LogType.Error);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 注销一个图片扩展名的「打开方式」关联：
+        /// 从 <c>OpenWithProgids</c> 移除本程序，并在没有任何扩展名再引用该 ProgId 时删除文件类型定义。
+        /// 不会触碰其它程序写入的关联。
+        /// </summary>
+        /// <param name="extension">图片扩展名（可带或不带点）。</param>
+        /// <param name="deleteProgIdIfUnused">为 true 时在无人引用后删除 ProgId 键。</param>
+        /// <returns>是否注销成功。</returns>
+        public static bool UnregisterImageViewerAssociation(string extension, bool deleteProgIdIfUnused = true)
+        {
+            try
+            {
+                string ext = NormalizeExtension(extension);
+                if (ext.Length <= 1) return false;
+
+                using (RegistryKey extensionKey = Registry.CurrentUser.OpenSubKey(@"Software\Classes\" + ext, true))
+                {
+                    using (RegistryKey openWithKey = extensionKey?.OpenSubKey("OpenWithProgids", true))
+                    {
+                        openWithKey?.DeleteValue(ImageViewerProgId, false);
+                    }
+                }
+
+                if (deleteProgIdIfUnused && !AnyOpenWithProgidsReference(ImageViewerProgId))
+                {
+                    Registry.CurrentUser.DeleteSubKeyTree(@"Software\Classes\" + ImageViewerProgId, false);
+                }
+
+                LogHelper.WriteLogToFile($"已注销图片格式关联: {ext}", LogHelper.LogType.Event);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"注销图片格式关联失败（{extension}）: {ex.Message}", LogHelper.LogType.Error);
+                return false;
+            }
+        }
+
+        /// <summary>移除本程序写入的全部图片查看器关联（ProgId + Applications 条目）。</summary>
+        /// <param name="extensions">要清理的扩展名集合。</param>
+        public static void RemoveAllImageViewerAssociations(IEnumerable<string> extensions)
+        {
+            foreach (var raw in (extensions ?? Enumerable.Empty<string>()).ToList())
+            {
+                UnregisterImageViewerAssociation(raw, deleteProgIdIfUnused: false);
+            }
+
+            try
+            {
+                Registry.CurrentUser.DeleteSubKeyTree(@"Software\Classes\" + ImageViewerProgId, false);
+                Registry.CurrentUser.DeleteSubKeyTree(ImageViewerApplicationKeyPath, false);
+                LogHelper.WriteLogToFile("已清除本程序写入的图片查看器关联", LogHelper.LogType.Event);
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"清除图片查看器关联失败: {ex.Message}", LogHelper.LogType.Warning);
+            }
+        }
+
+        /// <summary>某个 ProgId 是否仍被任何扩展名的 <c>OpenWithProgids</c> 引用。</summary>
+        private static bool AnyOpenWithProgidsReference(string progId)
+        {
+            try
+            {
+                using (RegistryKey classesKey = Registry.CurrentUser.OpenSubKey(@"Software\Classes"))
+                {
+                    if (classesKey == null) return false;
+
+                    foreach (var subKeyName in classesKey.GetSubKeyNames())
+                    {
+                        if (!subKeyName.StartsWith(".", StringComparison.Ordinal)) continue;
+
+                        using (RegistryKey openWithKey = classesKey.OpenSubKey(subKeyName + @"\OpenWithProgids"))
+                        {
+                            if (openWithKey?.GetValue(progId) != null) return true;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"检查 ProgId 引用失败: {ex.Message}", LogHelper.LogType.Warning);
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// 检查某图片扩展名是否已由本程序写入「打开方式」关联，且命令确实指向当前 exe。
+        /// </summary>
+        /// <param name="extension">图片扩展名（可带或不带点）。</param>
+        /// <returns>已注册且指向本进程时返回 true。</returns>
+        public static bool IsImageViewerAssociationRegistered(string extension)
+        {
+            try
+            {
+                string ext = NormalizeExtension(extension);
+                if (ext.Length <= 1) return false;
+
+                using (RegistryKey openWithKey = Registry.CurrentUser.OpenSubKey(@"Software\Classes\" + ext + @"\OpenWithProgids"))
+                {
+                    if (openWithKey?.GetValue(ImageViewerProgId) == null) return false;
+                }
+
+                using (RegistryKey commandKey = Registry.CurrentUser.OpenSubKey(
+                           @"Software\Classes\" + ImageViewerProgId + @"\shell\open\command"))
+                {
+                    string command = commandKey?.GetValue("") as string;
+                    if (string.IsNullOrEmpty(command)) return false;
+
+                    string exePath = CurrentExecutablePath();
+                    return command.IndexOf(exePath, StringComparison.OrdinalIgnoreCase) >= 0
+                           && command.IndexOf(ImageViewerCommandLineSwitch, StringComparison.OrdinalIgnoreCase) >= 0;
+                }
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"检查图片格式关联状态失败（{extension}）: {ex.Message}", LogHelper.LogType.Warning);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 尽力把某扩展名的「当前用户默认处理程序」指向本程序。
+        /// <para>
+        /// Windows 10/11 的默认应用由 <c>FileExts\.ext\UserChoice</c>（带哈希保护）决定，
+        /// 程序无法合法改写；本方法只在<b>不存在</b> <c>UserChoice</c> 时写
+        /// <c>HKCU\Software\Classes\.ext</c> 的默认值。返回 false 表示需要用户到系统设置里手动确认，
+        /// 调用方应随后调用 <see cref="OpenDefaultAppsSettings"/>。
+        /// </para>
+        /// </summary>
+        /// <param name="extension">图片扩展名（可带或不带点）。</param>
+        /// <returns>是否已把 UserChoice 之外的默认值写为本程序。</returns>
+        public static bool TrySetUserDefaultProgId(string extension)
+        {
+            try
+            {
+                string ext = NormalizeExtension(extension);
+                if (ext.Length <= 1) return false;
+
+                using (RegistryKey userChoice = Registry.CurrentUser.OpenSubKey(
+                           @"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\" + ext + @"\UserChoice"))
+                {
+                    if (userChoice?.GetValue("ProgId") != null)
+                    {
+                        LogHelper.WriteLogToFile(
+                            $"{ext} 已被 UserChoice 指定默认程序，无法程序化改写", LogHelper.LogType.Event);
+                        return false;
+                    }
+                }
+
+                using (RegistryKey extensionKey = Registry.CurrentUser.CreateSubKey(@"Software\Classes\" + ext))
+                {
+                    extensionKey?.SetValue("", ImageViewerProgId);
+                }
+
+                RefreshSystemFileAssociations();
+                LogHelper.WriteLogToFile($"{ext} 的默认处理程序已指向 {ImageViewerProgId}", LogHelper.LogType.Event);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"设置 {extension} 默认处理程序失败: {ex.Message}", LogHelper.LogType.Warning);
+                return false;
+            }
+        }
+
+        /// <summary>打开系统「默认应用」设置页，让用户把图片格式指定给本程序。</summary>
+        /// <returns>是否成功拉起设置页。</returns>
+        public static bool OpenDefaultAppsSettings()
+        {
+            // Win11 先尝试直接跳到本应用的默认值设置；失败再退回到通用页。
+            string[] targets = { "ms-settings:defaultapps?registeredAppUser=" + ImageViewerAppDisplayName, "ms-settings:defaultapps" };
+            foreach (var target in targets)
+            {
+                try
+                {
+                    Process.Start(new ProcessStartInfo(target) { UseShellExecute = true });
+                    LogHelper.WriteLogToFile($"已打开系统默认应用设置: {target}", LogHelper.LogType.Event);
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    LogHelper.WriteLogToFile($"打开默认应用设置失败（{target}）: {ex.Message}", LogHelper.LogType.Warning);
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// 按扩展名列表整体写入 / 撤销图片查看器关联。
+        /// </summary>
+        /// <param name="extensions">要注册的扩展名集合。</param>
+        /// <param name="displayNameLookup">扩展名 → 显示名的映射，可为 null。</param>
+        /// <returns>成功注册的扩展名数量与失败数量。</returns>
+        public static (int Succeeded, int Failed) ApplyImageViewerAssociations(
+            IEnumerable<string> extensions, Func<string, string> displayNameLookup = null)
+        {
+            var list = (extensions ?? Enumerable.Empty<string>())
+                .Select(NormalizeExtension)
+                .Where(e => e.Length > 1)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            int ok = 0, failed = 0;
+            RegisterImageViewerApplication(list);
+
+            foreach (var ext in list)
+            {
+                string displayName = null;
+                try { displayName = displayNameLookup?.Invoke(ext); }
+                catch (Exception ex) { System.Diagnostics.Debug.WriteLine(ex); }
+
+                if (RegisterImageViewerAssociation(ext, displayName)) ok++;
+                else failed++;
+            }
+
+            RefreshSystemFileAssociations();
+            return (ok, failed);
+        }
+
+        /// <summary>
+        /// 从命令行参数中取出「应由内置图片查看器打开的图片路径」。
+        /// <para>
+        /// 判定与顺序无关：只要某个参数是现存的图片文件，且其扩展名落在
+        /// <paramref name="settings"/> 已绑定的格式内，就返回它。这样无论注册表把图片写成
+        /// <c>-image "x.png"</c>、单独 <c>"x.png"</c>，还是被拖到 exe 上都能识别。
+        /// </para>
+        /// </summary>
+        /// <param name="args">命令行参数。</param>
+        /// <param name="settings">图片查看器设置（用于取已绑定扩展名）。</param>
+        /// <returns>找到的图片路径；没有则返回 null。</returns>
+        public static string GetImageViewerFileFromArgs(string[] args, Ink_Canvas.ImageViewerSettings settings)
+        {
+            if (args == null || args.Length == 0) return null;
+
+            foreach (string arg in args)
+            {
+                if (string.IsNullOrWhiteSpace(arg)) continue;
+                if (arg.StartsWith("-", StringComparison.Ordinal) || arg.StartsWith("/", StringComparison.Ordinal)) continue;
+
+                if (ImageViewerFormats.ShouldOpenInViewer(arg, settings))
+                {
+                    LogHelper.WriteLogToFile($"从命令行参数中找到图片: {arg}", LogHelper.LogType.Event);
+                    return arg;
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// 尝试通过 IPC 把图片路径交给已运行的实例打开（多实例：由该实例再决定新开还是复用窗口）。
+        /// </summary>
+        /// <param name="filePath">图片路径。</param>
+        /// <returns>是否成功发送。</returns>
+        public static bool TrySendImageViewerFileToExistingInstance(string filePath)
+        {
+            try
+            {
+                LogHelper.WriteLogToFile($"尝试通过IPC发送图片路径给已运行实例: {filePath}", LogHelper.LogType.Event);
+
+                string tempDir = Path.GetTempPath();
+                string ipcFilePath = Path.Combine(tempDir, IpcImageViewerFilePrefix + Guid.NewGuid().ToString("N") + ".tmp");
+                File.WriteAllText(ipcFilePath, filePath, Encoding.UTF8);
+
+                using (EventWaitHandle ipcEvent = new EventWaitHandle(false, EventResetMode.ManualReset, IpcEventName))
+                {
+                    ipcEvent.Set();
+                }
+
+                Thread.Sleep(1000);
+
+                try
+                {
+                    if (File.Exists(ipcFilePath)) File.Delete(ipcFilePath);
+                }
+                catch (Exception ex)
+                {
+                    LogHelper.WriteLogToFile($"清理图片 IPC 文件失败: {ex.Message}", LogHelper.LogType.Warning);
+                }
+
+                LogHelper.WriteLogToFile("图片 IPC 路径发送完成", LogHelper.LogType.Event);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"通过IPC发送图片路径失败: {ex.Message}", LogHelper.LogType.Error);
+                return false;
+            }
         }
 
         #endregion
@@ -766,7 +1282,7 @@ namespace Ink_Canvas.Helpers
             try
             {
                 string tempDir = Path.GetTempPath();
-                string[] prefixes = { IpcFilePrefix, IpcBoardModePrefix, IpcShowModePrefix, IpcUriCommandPrefix, IpcPluginFileOpenPrefix };
+                string[] prefixes = { IpcFilePrefix, IpcBoardModePrefix, IpcShowModePrefix, IpcUriCommandPrefix, IpcPluginFileOpenPrefix, IpcImageViewerFilePrefix };
                 int cleaned = 0;
                 foreach (string prefix in prefixes)
                 {
@@ -1047,6 +1563,45 @@ namespace Ink_Canvas.Helpers
                             {
                                 File.Delete(ipcFile);
                             }
+                        }
+                        catch (Exception innerEx) { System.Diagnostics.Debug.WriteLine(innerEx); }
+                    }
+                }
+
+                // 处理图片查看器文件路径 IPC 文件（双击图片启动，已有实例接收）
+                string[] imageViewerFiles = Directory.GetFiles(tempDir, IpcImageViewerFilePrefix + "*.tmp");
+                foreach (string ipcFile in imageViewerFiles)
+                {
+                    try
+                    {
+                        string filePath = File.ReadAllText(ipcFile, Encoding.UTF8);
+
+                        if (!string.IsNullOrEmpty(filePath) && File.Exists(filePath))
+                        {
+                            LogHelper.WriteLogToFile($"IPC接收到图片路径: {filePath}", LogHelper.LogType.Event);
+
+                            Application.Current.Dispatcher.BeginInvoke(new Action(() =>
+                            {
+                                try
+                                {
+                                    Windows.ImageViewerManager.OpenImage(filePath);
+                                }
+                                catch (Exception ex)
+                                {
+                                    LogHelper.WriteLogToFile($"IPC处理图片打开失败: {ex.Message}", LogHelper.LogType.Error);
+                                }
+                            }));
+                        }
+
+                        File.Delete(ipcFile);
+                    }
+                    catch (Exception ex)
+                    {
+                        LogHelper.WriteLogToFile($"处理图片 IPC 文件失败: {ex.Message}", LogHelper.LogType.Warning);
+
+                        try
+                        {
+                            if (File.Exists(ipcFile)) File.Delete(ipcFile);
                         }
                         catch (Exception innerEx) { System.Diagnostics.Debug.WriteLine(innerEx); }
                     }

@@ -3,6 +3,7 @@ using Ink_Canvas.Helpers;
 using Ink_Canvas.Properties;
 using IWshRuntimeLibrary;
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Windows;
@@ -27,8 +28,18 @@ namespace Ink_Canvas.Windows.SettingsViews.Helpers
         public const string FeatureRandom = "rand";       // 抽选
         public const string FeatureSettings = "settings"; // 设置
         public const string FeatureAnnotate = "annotate"; // 批注
+        public const string FeatureImageViewer = "imageviewer"; // 内置图片查看器（无 icc:// 命令，只用其专属图标）
 
         private const string BadgeText = "ICC";
+
+        /// <summary>
+        /// 生成 .ico 时写出的尺寸集合。多尺寸是必要的：任务栏/标题栏按 16~48 显示，
+        /// 只给一张 256 会被系统缩小成糊图。
+        /// </summary>
+        private static readonly int[] IconSizes = { 16, 32, 48, 256 };
+
+        /// <summary>小于该尺寸时不再画右下角 ICC 字样（那几像素画出来只是污点）。</summary>
+        private const int BadgeTextMinSize = 48;
 
         // 徽章固定配色：近乎不透明的白色圆角矩形（95%）+ 深色图标文字，在任意桌面壁纸上均可辨识
         private static readonly Color BadgeFillColor = Color.FromArgb(0xF2, 0xFF, 0xFF, 0xFF);
@@ -41,7 +52,7 @@ namespace Ink_Canvas.Windows.SettingsViews.Helpers
 
         private const string ThemeForegroundBrushKey = "SystemControlForegroundBaseHighBrush";
 
-        /// <summary>获取功能对应的 icc:// 命令路径（不含协议头）。</summary>
+        /// <summary>获取功能对应的 icc:// 命令路径（不含协议头）。图片查看器没有命令，返回 null。</summary>
         public static string GetFeatureUri(string feature)
         {
             switch (feature)
@@ -51,11 +62,12 @@ namespace Ink_Canvas.Windows.SettingsViews.Helpers
                 case FeatureRandom: return "rand";
                 case FeatureSettings: return "settings";
                 case FeatureAnnotate: return "tool/pen";
+                case FeatureImageViewer: return null; // 查看器由文件关联/命令行打开，没有 icc:// 入口
                 default: return null;
             }
         }
 
-        /// <summary>获取功能的本地化名称（同时用于快捷方式文件名）。</summary>
+        /// <summary>获取功能的本地化名称（同时用于快捷方式文件名与注册表里的展示名）。</summary>
         public static string GetFeatureLabel(string feature)
         {
             switch (feature)
@@ -65,9 +77,28 @@ namespace Ink_Canvas.Windows.SettingsViews.Helpers
                 case FeatureRandom: return StartupStrings.ExternalProtocol_Shortcut_Random;
                 case FeatureSettings: return StartupStrings.ExternalProtocol_Shortcut_Settings;
                 case FeatureAnnotate: return StartupStrings.ExternalProtocol_Shortcut_Annotate;
+                case FeatureImageViewer: return ImageViewerStrings.GroupTitle;
                 default: return feature;
             }
         }
+
+        /// <summary>
+        /// 内置图片查看器的展示名（"Ink Canvas 图片查看器"）。
+        /// 同时用于：窗口标题栏、任务栏（含「固定到任务栏」后的名称）、
+        /// 以及资源管理器「打开方式」列表里显示的应用名。
+        /// </summary>
+        public static string ImageViewerDisplayName => "Ink Canvas " + GetFeatureLabel(FeatureImageViewer);
+
+        /// <summary>
+        /// 获取内置图片查看器的专属图标（.ico）路径，按需生成；失败返回 null。
+        /// 与「创建快捷方式」用的是同一个图标生成器（同一套圆角底 + 程序内图标 + ICC 角标绘制参数），
+        /// 只是把程序内图标换成图片查看器图标。
+        /// </summary>
+        public static string EnsureImageViewerIconFile() => EnsureIconFile(FeatureImageViewer);
+
+        /// <summary>图标所在目录（供调用方判断可用性 / 清理）。</summary>
+        public static string IconDirectory
+            => Path.Combine(AppDomain.CurrentDomain.SetupInformation.ApplicationBase, "ShortcutIcons");
 
         /// <summary>获取功能在程序内使用的图标：几何路径字符串或 FontIconData 字形。</summary>
         private static object GetFeatureIcon(string feature)
@@ -79,6 +110,7 @@ namespace Ink_Canvas.Windows.SettingsViews.Helpers
                 case FeatureRandom: return XamlGraphicsIconGeometries.RandomDrawIconGeometry;
                 case FeatureSettings: return SegoeFluentIcons.Settings;
                 case FeatureAnnotate: return XamlGraphicsIconGeometries.SolidPenIcon;
+                case FeatureImageViewer: return SegoeFluentIcons.Photo;
                 default: return null;
             }
         }
@@ -188,15 +220,21 @@ namespace Ink_Canvas.Windows.SettingsViews.Helpers
         }
 
         /// <summary>生成（或覆盖）功能徽章 .ico 文件并返回路径，失败返回 null。
-        /// 每次都重新生成：避免代码更新徽章样式后，旧的缓存 ico 一直被快捷方式复用。</summary>
+        /// 每次都用完整尺寸集重新生成：既避免代码更新徽章样式后旧 ico 被继续复用，
+        /// 也保证任务栏/标题栏拿到的是「原生该尺寸」的帧而不是缩小的 256 图。</summary>
         private static string EnsureIconFile(string feature)
         {
             try
             {
-                string dir = Path.Combine(AppDomain.CurrentDomain.SetupInformation.ApplicationBase, "ShortcutIcons");
+                string dir = IconDirectory;
                 string path = Path.Combine(dir, feature + ".ico");
                 Directory.CreateDirectory(dir);
-                WriteIco(path, RenderBadgeToPng(feature, 256), 256);
+
+                var frames = new List<(int Size, byte[] Png)>(IconSizes.Length);
+                foreach (int size in IconSizes)
+                    frames.Add((size, RenderBadgeToPng(feature, size)));
+
+                WriteIco(path, frames);
                 return path;
             }
             catch (Exception ex)
@@ -222,7 +260,7 @@ namespace Ink_Canvas.Windows.SettingsViews.Helpers
                     rect, cornerRadius, cornerRadius);
 
                 DrawIcon(dc, feature, size, size * 0.55);
-                DrawBadgeText(dc, size, size * 0.18);
+                if (size >= BadgeTextMinSize) DrawBadgeText(dc, size, size * 0.18);
             }
 
             var rtb = new RenderTargetBitmap(size, size, 96, 96, PixelFormats.Pbgra32);
@@ -284,26 +322,40 @@ namespace Ink_Canvas.Windows.SettingsViews.Helpers
             dc.DrawText(line, new Point(right - line.Width, bottom - line.Height));
         }
 
-        /// <summary>把 PNG 字节包装为单帧 ICO 文件（256px PNG 压缩条目）。</summary>
-        private static void WriteIco(string path, byte[] png, int size)
+        /// <summary>
+        /// 把若干尺寸的 PNG 帧打包为多帧 ICO 文件（每帧都是 PNG 压缩条目，Vista+ 支持）。
+        /// 宽高字节写 0 表示 256。
+        /// </summary>
+        private static void WriteIco(string path, IReadOnlyList<(int Size, byte[] Png)> frames)
         {
+            if (frames == null || frames.Count == 0) return;
+
+            const int directoryEntrySize = 16;
+            int headerSize = 6 + directoryEntrySize * frames.Count;
+
             using var fs = new FileStream(path, FileMode.Create, FileAccess.Write);
             using var bw = new BinaryWriter(fs);
 
-            bw.Write((short)0);  // 保留字段
-            bw.Write((short)1);  // 类型：图标
-            bw.Write((short)1);  // 图像数量
+            bw.Write((short)0);                 // 保留字段
+            bw.Write((short)1);                 // 类型：图标
+            bw.Write((short)frames.Count);      // 图像数量
 
-            bw.Write((byte)(size >= 256 ? 0 : size)); // 宽（0 表示 256）
-            bw.Write((byte)(size >= 256 ? 0 : size)); // 高
-            bw.Write((byte)0);   // 调色板色数
-            bw.Write((byte)0);   // 保留
-            bw.Write((short)1);  // 颜色平面数
-            bw.Write((short)32); // 位深
-            bw.Write(png.Length);
-            bw.Write(6 + 16);    // 图像数据偏移（ICONDIR + ICONDIRENTRY）
+            int offset = headerSize;
+            foreach (var (size, png) in frames)
+            {
+                byte dimension = (byte)(size >= 256 ? 0 : size);
+                bw.Write(dimension);            // 宽（0 表示 256）
+                bw.Write(dimension);            // 高
+                bw.Write((byte)0);              // 调色板色数
+                bw.Write((byte)0);              // 保留
+                bw.Write((short)1);             // 颜色平面数
+                bw.Write((short)32);            // 位深
+                bw.Write(png.Length);           // 数据长度
+                bw.Write(offset);               // 数据偏移
+                offset += png.Length;
+            }
 
-            bw.Write(png);
+            foreach (var (_, png) in frames) bw.Write(png);
         }
     }
 }

@@ -1,0 +1,312 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <xsd:schema id="root" xmlns="" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:msdata="urn:schemas-microsoft-com:xml-msdata">
+    <xsd:import namespace="http://www.w3.org/XML/1998/namespace" />
+    <xsd:element name="root" msdata:IsDataSet="true">
+      <xsd:complexType>
+        <xsd:choice maxOccurs="unbounded">
+          <xsd:element name="metadata">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" />
+              </xsd:sequence>
+              <xsd:attribute name="name" use="required" type="xsd:string" />
+              <xsd:attribute name="type" type="xsd:string" />
+              <xsd:attribute name="mimetype" type="xsd:string" />
+              <xsd:attribute ref="xml:space" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="assembly">
+            <xsd:complexType>
+              <xsd:attribute name="alias" type="xsd:string" />
+              <xsd:attribute name="name" type="xsd:string" />
+            </xsd:complexType>
+          </xsd:element>
+          <xsd:element name="data">
+            <xsd:complexType>
+              <xsd:sequence>
+                <xsd:element name="value" type="xsd:string" minOccurs="0" msdata:Ordinal="1" />
+                <xsd:element name="comment" type="xsd:string" minOccurs="0" msdata:Ordinal="2" />
+              </xsd:sequence>
+              <xsd:attribute name="name" type="xsd:string" use="required" msdata:Ordinal="1" />
+              <xsd:attribute name="type" type="xsd:string" msdata:Ordinal="3" />
+              <xsd:attribute name="mimetype" type="xsd:string" msdata:Ordinal="4" />
+              <xsd:attribute ref="xml:space" />
+            </xsd:complexType>
+          </xsd:element>
+        </xsd:choice>
+      </xsd:complexType>
+    </xsd:element>
+  </xsd:schema>
+  <resheader name="resmimetype"><value>text/microsoft-resx</value></resheader>
+  <resheader name="version"><value>2.0</value></resheader>
+  <resheader name="reader"><value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader>
+  <resheader name="writer"><value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader>
+  <data name="GroupTitle" xml:space="preserve">
+    <value>Image viewer</value>
+  </data>
+  <data name="MasterToggle" xml:space="preserve">
+    <value>Enable built-in image viewer</value>
+  </data>
+  <data name="MasterToggleHint" xml:space="preserve">
+    <value>Bind common image formats to this app. Double-click a bound image to open it on a standalone canvas whose background is the image itself, ready for annotation.</value>
+  </data>
+  <data name="FormatsGroupHeader" xml:space="preserve">
+    <value>Format binding</value>
+  </data>
+  <data name="FormatsHint" xml:space="preserve">
+    <value>Tick the formats this app should open. Unticked formats keep using the system default app.</value>
+  </data>
+  <data name="FormatsUnsupportedSuffix" xml:space="preserve">
+    <value> (not decodable on this PC)</value>
+  </data>
+  <data name="NoFormatsBound" xml:space="preserve">
+    <value>No format bound yet - no image will be taken over.</value>
+  </data>
+  <data name="SelectAllCommon" xml:space="preserve">
+    <value>Select all formats available on this PC</value>
+  </data>
+  <data name="ClearAll" xml:space="preserve">
+    <value>Clear all</value>
+  </data>
+  <data name="CustomFormatHeader" xml:space="preserve">
+    <value>Custom extension</value>
+  </data>
+  <data name="CustomFormatDescription" xml:space="preserve">
+    <value>Add an image extension outside the built-in list (for example .jxl). Press Enter or click Add.</value>
+  </data>
+  <data name="CustomFormatPlaceholder" xml:space="preserve">
+    <value>e.g. .jxl</value>
+  </data>
+  <data name="AddCustomFormat" xml:space="preserve">
+    <value>Add</value>
+  </data>
+  <data name="CustomFormatInvalid" xml:space="preserve">
+    <value>Invalid extension: use a form such as .png</value>
+  </data>
+  <data name="CustomFormatDuplicate" xml:space="preserve">
+    <value>That extension is already in the list</value>
+  </data>
+  <data name="CustomFormatAdded" xml:space="preserve">
+    <value>Added {0}. If this PC cannot decode the format, opening it will report that.</value>
+  </data>
+  <data name="AssociationGroupHeader" xml:space="preserve">
+    <value>System association</value>
+  </data>
+  <data name="RegisterFileAssociation" xml:space="preserve">
+    <value>Add to the "Open with" list</value>
+  </data>
+  <data name="RegisterFileAssociationHint" xml:space="preserve">
+    <value>Register bound formats under the current user so they appear in the Explorer "Open with" menu (no administrator rights needed).</value>
+  </data>
+  <data name="ApplyAssociation" xml:space="preserve">
+    <value>Write associations now</value>
+  </data>
+  <data name="RemoveAssociation" xml:space="preserve">
+    <value>Remove associations written by this app</value>
+  </data>
+  <data name="DefaultAppHint" xml:space="preserve">
+    <value>Windows does not allow apps to change the default handler silently. To open images by double-click, assign the file types to this app in Windows Settings.</value>
+  </data>
+  <data name="OpenDefaultApps" xml:space="preserve">
+    <value>Open Windows default apps settings</value>
+  </data>
+  <data name="AssociationStatusHeader" xml:space="preserve">
+    <value>Association status</value>
+  </data>
+  <data name="AssociationStatusWritten" xml:space="preserve">
+    <value>written</value>
+  </data>
+  <data name="AssociationStatusNotWritten" xml:space="preserve">
+    <value>not written</value>
+  </data>
+  <data name="AssociationNoneBound" xml:space="preserve">
+    <value>nothing bound</value>
+  </data>
+  <data name="AssociationWriteResult" xml:space="preserve">
+    <value>Done: {0} succeeded, {1} failed</value>
+  </data>
+  <data name="AssociationRemoved" xml:space="preserve">
+    <value>Associations written by this app were removed</value>
+  </data>
+  <data name="ViewerGroupHeader" xml:space="preserve">
+    <value>Viewer window</value>
+  </data>
+  <data name="MultiInstance" xml:space="preserve">
+    <value>Multiple instances (one window per image)</value>
+  </data>
+  <data name="MultiInstanceHint" xml:space="preserve">
+    <value>When on, every image gets its own window, and the taskbar shows a live preview per window that can be restored separately. When off, a newly opened image reuses the existing window.</value>
+  </data>
+  <data name="ShowInTaskbar" xml:space="preserve">
+    <value>Show in the taskbar</value>
+  </data>
+  <data name="ShowInTaskbarHint" xml:space="preserve">
+    <value>Restore quickly from the taskbar thumbnail after minimising.</value>
+  </data>
+  <data name="EdgeSnap" xml:space="preserve">
+    <value>Snap to screen edges</value>
+  </data>
+  <data name="EdgeSnapHint" xml:space="preserve">
+    <value>Drag to the top edge and release to maximise; drag to the left or right edge to fill that half of the screen. The window can never be dragged off-screen.</value>
+  </data>
+  <data name="RememberWindowPlacement" xml:space="preserve">
+    <value>Remember window position and size</value>
+  </data>
+  <data name="RememberWindowPlacementHint" xml:space="preserve">
+    <value>Reuse the last window position and size next time. Off-screen placements are pulled back into view.</value>
+  </data>
+  <data name="OpenFitToWindow" xml:space="preserve">
+    <value>Fit to window on open</value>
+  </data>
+  <data name="OpenFitToWindowHint" xml:space="preserve">
+    <value>When off, the image is shown at its original 100% pixel size.</value>
+  </data>
+  <data name="AutoSaveAnnotations" xml:space="preserve">
+    <value>Auto-save annotations</value>
+  </data>
+  <data name="AutoSaveAnnotationsHint" xml:space="preserve">
+    <value>Save annotations to the config folder when the viewer closes, and restore them the next time the same image is opened.</value>
+  </data>
+  <data name="BackgroundColor" xml:space="preserve">
+    <value>Letterbox background colour</value>
+  </data>
+  <data name="BackgroundColorHint" xml:space="preserve">
+    <value>Colour used for the area outside the image.</value>
+  </data>
+  <data name="TestOpenImage" xml:space="preserve">
+    <value>Open an image to try it out</value>
+  </data>
+  <data name="DisabledNotice" xml:space="preserve">
+    <value>The image viewer is off - no image format is taken over.</value>
+  </data>
+  <data name="BarPrevious" xml:space="preserve">
+    <value>Previous image</value>
+  </data>
+  <data name="BarFolder" xml:space="preserve">
+    <value>Folder</value>
+  </data>
+  <data name="BarNext" xml:space="preserve">
+    <value>Next image</value>
+  </data>
+  <data name="BarZoomIn" xml:space="preserve">
+    <value>Zoom in</value>
+  </data>
+  <data name="BarZoomOut" xml:space="preserve">
+    <value>Zoom out</value>
+  </data>
+  <data name="BarRotateCw" xml:space="preserve">
+    <value>Rotate 90° clockwise</value>
+  </data>
+  <data name="BarRotateCcw" xml:space="preserve">
+    <value>Rotate 90° counter-clockwise</value>
+  </data>
+  <data name="BarAdjust" xml:space="preserve">
+    <value>Image adjustments</value>
+  </data>
+  <data name="BarMinimize" xml:space="preserve">
+    <value>Minimise</value>
+  </data>
+  <data name="BarMaximize" xml:space="preserve">
+    <value>Maximise</value>
+  </data>
+  <data name="BarRestore" xml:space="preserve">
+    <value>Restore</value>
+  </data>
+  <data name="BarFullScreen" xml:space="preserve">
+    <value>Full screen</value>
+  </data>
+  <data name="BarExitFullScreen" xml:space="preserve">
+    <value>Exit full screen</value>
+  </data>
+  <data name="BarClose" xml:space="preserve">
+    <value>Close</value>
+  </data>
+  <data name="BarUndo" xml:space="preserve">
+    <value>Undo annotation</value>
+  </data>
+  <data name="BarRedo" xml:space="preserve">
+    <value>Redo annotation</value>
+  </data>
+  <data name="BarFitToWindow" xml:space="preserve">
+    <value>Fit to window</value>
+  </data>
+  <data name="BarActualSize" xml:space="preserve">
+    <value>Actual size</value>
+  </data>
+  <data name="AdjustTitle" xml:space="preserve">
+    <value>Image adjustments</value>
+  </data>
+  <data name="AdjustBrightness" xml:space="preserve">
+    <value>Brightness</value>
+  </data>
+  <data name="AdjustContrast" xml:space="preserve">
+    <value>Contrast</value>
+  </data>
+  <data name="AdjustSaturation" xml:space="preserve">
+    <value>Saturation</value>
+  </data>
+  <data name="AdjustReset" xml:space="preserve">
+    <value>Reset</value>
+  </data>
+  <data name="WindowTitleSuffix" xml:space="preserve">
+    <value>Image viewer</value>
+  </data>
+  <data name="LoadFailedTitle" xml:space="preserve">
+    <value>Cannot open image</value>
+  </data>
+  <data name="LoadFailedMessage" xml:space="preserve">
+    <value>Could not decode this image file: {0}</value>
+  </data>
+  <data name="ImageInfoFormat" xml:space="preserve">
+    <value>{0} x {1} px - {2}%</value>
+  </data>
+  <data name="ImageIndexFormat" xml:space="preserve">
+    <value>{0} / {1}</value>
+  </data>
+  <data name="MenuShowInExplorer" xml:space="preserve">
+    <value>Show in File Explorer</value>
+  </data>
+  <data name="MenuCopyPath" xml:space="preserve">
+    <value>Copy file path</value>
+  </data>
+  <data name="MenuFitWindow" xml:space="preserve">
+    <value>Fit to window</value>
+  </data>
+  <data name="MenuActualSize" xml:space="preserve">
+    <value>Actual size</value>
+  </data>
+  <data name="SingleInstanceReused" xml:space="preserve">
+    <value>Single-instance mode is on: newly opened images reuse the same window.</value>
+  </data>
+  <data name="DragHint" xml:space="preserve">
+    <value>Drag an empty area to move the window - drag the border to resize</value>
+  </data>
+  <data name="BarInkWriting" xml:space="preserve">
+    <value>Ink writing</value>
+  </data>
+  <data name="BarInkWritingHint" xml:space="preserve">
+    <value>Switch to annotation mode: the main toolbar enters pen mode and you can write on this image, exactly like the UI-linkage canvas.</value>
+  </data>
+  <data name="BarInkWritingActiveHint" xml:space="preserve">
+    <value>Currently annotating - click to leave annotation mode and return to mouse</value>
+  </data>
+  <data name="BarRotateCwShort" xml:space="preserve">
+    <value>CW</value>
+  </data>
+  <data name="BarRotateCcwShort" xml:space="preserve">
+    <value>CCW</value>
+  </data>
+  <data name="WindowTitleBrand" xml:space="preserve">
+    <value>Ink Canvas Image viewer</value>
+  </data>
+  <data name="ResetToDefault" xml:space="preserve">
+    <value>Reset to default</value>
+  </data>
+  <data name="ResetBackgroundColorHint" xml:space="preserve">
+    <value>Restore the letterbox background colour to the default dark grey</value>
+  </data>
+  <data name="FullScreenExitHint" xml:space="preserve">
+    <value>Press Esc or click here to exit full screen</value>
+  </data>
+</root>

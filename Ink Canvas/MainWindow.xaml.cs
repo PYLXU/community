@@ -2576,9 +2576,13 @@ namespace Ink_Canvas
         }
 
         /// <summary>
-        /// 处理橡皮擦操作结束事件
+        /// 处理橡皮擦操作结束事件。
+        /// <para>
+        /// <c>internal</c>：内置图片查看器在完成一次擦除手势后也要调用它，
+        /// 这样「橡皮擦自动切换回批注」在查看器里与主画布/UI 联动画布表现一致。
+        /// </para>
         /// </summary>
-        private void HandleEraserOperationEnded()
+        internal void HandleEraserOperationEnded()
         {
             try
             {
@@ -3480,6 +3484,28 @@ namespace Ink_Canvas
                         {
                             LogHelper.WriteLogToFile($"打开命令行参数中的文件失败: {ex.Message}", LogHelper.LogType.Error);
                             ShowNotification(Properties.MainWindowStrings.Main_StrokesFileOpenFailed);
+                        }
+                    }), DispatcherPriority.Loaded);
+                }
+
+                // 检查启动参数中是否有「已绑定到内置图片查看器」的图片文件。
+                // 判定完全依赖设置（总开关 + 已绑定扩展名 + 本机可解码），未启用时不会接管任何图片。
+                string imageFile = FileAssociationManager.GetImageViewerFileFromArgs(
+                    App.StartArgs, SettingsManager.Settings.ImageViewer);
+
+                if (!string.IsNullOrEmpty(imageFile))
+                {
+                    LogHelper.WriteLogToFile($"检测到命令行参数中的图片文件: {imageFile}", LogHelper.LogType.Event);
+
+                    Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        try
+                        {
+                            Ink_Canvas.Windows.ImageViewerManager.OpenImage(imageFile);
+                        }
+                        catch (Exception ex)
+                        {
+                            LogHelper.WriteLogToFile($"打开命令行参数中的图片失败: {ex.Message}", LogHelper.LogType.Error);
                         }
                     }), DispatcherPriority.Loaded);
                 }

@@ -98,12 +98,29 @@ namespace Ink_Canvas
                 _lastInkActivityTarget = InkActivityTarget.None;
         }
 
-        /// <summary>供撤销/重做快捷键取用的「当前应作用的独立画布」；无可作用对象返回 null。</summary>
+        /// <summary>供撤销/重做快捷键取用的「当前应作用的卫星画布」；无可作用对象返回 null。</summary>
+        /// <remarks>
+        /// 「卫星画布」有两类：UI 联动批注层（Word / SumatraPDF）与内置图片查看器画布。
+        /// 两者都靠「最近落笔」判定，而不是焦点或鼠标位置 ——
+        /// 批注时焦点在 Word 或查看器窗口，只有落笔位置是可靠的用户意图。
+        /// 两边各自维护时间戳，这里按新鲜度取更近的那一块。
+        /// </remarks>
         private Ink_Canvas.Controls.IndependentCanvas GetActiveUILinkageCanvas()
         {
-            if (!_uiLinkageHasInkActivity) return null;
-            if (_lastInkActivityTarget != InkActivityTarget.Independent) return null;
-            if (DateTime.UtcNow - _lastInkActivityUtc > InkActivityFreshness) return null;
+            var now = DateTime.UtcNow;
+
+            // 图片查看器画布：全局热键下窗口收不到 Ctrl+Z，必须由宿主分派过来。
+            var (viewerCanvas, viewerUtc) = Ink_Canvas.Windows.ImageViewerManager.ActiveCanvasSnapshot;
+            bool viewerFresh = viewerCanvas != null && now - viewerUtc <= InkActivityFreshness;
+
+            bool uiLinkageFresh = _uiLinkageHasInkActivity
+                                  && _lastInkActivityTarget == InkActivityTarget.Independent
+                                  && now - _lastInkActivityUtc <= InkActivityFreshness;
+
+            if (viewerFresh && (!uiLinkageFresh || viewerUtc > _lastInkActivityUtc))
+                return viewerCanvas;
+
+            if (!uiLinkageFresh) return null;
 
             var inst = _uiLinkageInstances.FirstOrDefault(i =>
                 i.Bound && i.Canvas != null && i.Canvas.Visibility == Visibility.Visible);

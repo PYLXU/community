@@ -7,6 +7,8 @@ namespace Ink_Canvas.Helpers
     /// <summary>
     /// UI 联动 - 滚动读取与控制：
     /// - Word：通过 Win32 枚举子窗口找到文本区窗口（类名 _WwG），用 GetScrollInfo 读取滚动条状态。
+    ///   注意竖直轴走 UIA ScrollPattern（可靠），<b>横向轴必须以 _WwG 的水平滚动条为准</b>
+    ///   ——ScrollPattern 的横向读数不可靠，见 <see cref="TryGetWordHorizontalScroll"/>。
     /// - SumatraPDF：文档渲染区为画布子窗口（类名 SUMATRA_PDF_CANVAS），同样用 GetScrollInfo 读取；
     ///   程序性滚动通过 WM_VSCROLL/WM_HSCROLL 的 LINE/PAGE 相对步进 + 读数反馈闭环实现绝对定位
     ///   （SumatraPDF 的滚动处理不支持 SB_THUMBPOSITION，且 overlay 滚动条模式下预置 nPos 无效，
@@ -106,6 +108,12 @@ namespace Ink_Canvas.Helpers
             public int Max { get; }
             public uint Page { get; }
             public int Pos { get; }
+
+            /// <summary>内容单位总数（nMax − nMin + 1）。</summary>
+            public int Total => Max - Min + 1;
+
+            /// <summary>可滚动上限（内容总数 − 视口单位数），即 nPos 的有效最大值。</summary>
+            public int MaxPos => Math.Max(0, Total - (int)Page);
         }
 
         /// <summary>
@@ -174,6 +182,31 @@ namespace Ink_Canvas.Helpers
             if (!GetScrollInfo(hwnd, nBar, ref sc)) return false;
 
             info = new RawScrollInfo(sc.nMin, sc.nMax, sc.nPage, sc.nPos);
+            return true;
+        }
+
+        /// <summary>
+        /// 读取 Word 文本区（<c>_WwG</c>）的<b>水平</b>滚动条状态。
+        /// <para>
+        /// Word 的 UIA <c>ScrollPattern</c> 横向读数不可靠：横向常报
+        /// <c>NoScroll</c>（-1）或 0、<c>HorizontalViewSize</c> 报 100，即使文档明显宽于视口。
+        /// 沿用它推算横向偏移会塌成 0 —— 表现为独立画布横向滚动条弹回首位、墨迹不随横向滚动。
+        /// 因此横向位置与范围必须取自滚动条本身：<c>nPos</c> 为位置、<c>nMax+1</c> 为内容总单位数、
+        /// <c>nPage</c> 为视口占用的单位数（三者同一口径，换算 DIP 时用视口宽 / nPage 即可，
+        /// 与单位本身是像素、缇还是列无关）。
+        /// </para>
+        /// 返回 false 表示窗口不可读，或没有有效范围（内容未超出视口 / overlay 滚动条未暴露范围）。
+        /// </summary>
+        public static bool TryGetWordHorizontalScroll(IntPtr textAreaHwnd, out RawScrollInfo info)
+        {
+            info = default;
+            if (textAreaHwnd == IntPtr.Zero) return false;
+            if (!TryGetScroll(textAreaHwnd, SB_HORZ, out var raw)) return false;
+
+            // nPage == 0 或范围退化：视作「不可横向滚动」，交由页面实测帧表达（页面居中留白）。
+            if (raw.Page == 0 || raw.Max <= raw.Min) return false;
+
+            info = raw;
             return true;
         }
 

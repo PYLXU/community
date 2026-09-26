@@ -246,24 +246,14 @@
                        ClipToBounds="False" 
                        Background="Transparent" />
 
+            <!-- 擦头足迹（EraserFeedback 图像）由共用的 Ink_Canvas.Ink.EraserFootprint 在
+                 EraserOverlayCanvas_Loaded 里创建并挂到本覆盖层上，与内置图片查看器
+                 用的是同一份实现、同一组图片资源（见 MW_Eraser.xaml）。 -->
             <Canvas x:Name="EraserOverlayCanvas" d:Visibility="Collapsed"
                     Background="Transparent"
                     IsHitTestVisible="False"
                     Loaded="EraserOverlayCanvas_Loaded"
-                    Panel.ZIndex="1000">
-                <!-- 橡皮擦视觉反馈图像 -->
-                <Image x:Name="EraserFeedback"
-                       Canvas.Left="0"
-                       Canvas.Top="0"
-                       RenderTransformOrigin="0,0"
-                       Width="0"
-                       Height="0"
-                       Visibility="Collapsed">
-                    <Image.RenderTransform>
-                        <TranslateTransform x:Name="EraserFeedbackTranslateTransform"/>
-                    </Image.RenderTransform>
-                </Image>
-            </Canvas>
+                    Panel.ZIndex="1000" />
 
             <!-- 边缘扩展画布提示按钮（书写贴近边缘时浮现）。
                  用 Popup 实现，确保永远在最顶层且不被 InkCanvasGridForInkReplay 的兄弟节点

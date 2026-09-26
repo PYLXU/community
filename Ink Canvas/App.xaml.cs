@@ -1363,6 +1363,23 @@ namespace Ink_Canvas
                             LogHelper.WriteLogToFile("通过IPC发送插件关联文件路径失败", LogHelper.LogType.Warning);
                         }
                     }
+                    // 检查是否有图片参数（已绑定到内置图片查看器的格式）
+                    else if (!string.IsNullOrEmpty(FileAssociationManager.GetImageViewerFileFromArgs(
+                                 e.Args, Ink_Canvas.Windows.SettingsViews.Helpers.SettingsManager.Settings.ImageViewer)))
+                    {
+                        string imageFile = FileAssociationManager.GetImageViewerFileFromArgs(
+                            e.Args, Ink_Canvas.Windows.SettingsViews.Helpers.SettingsManager.Settings.ImageViewer);
+                        LogHelper.WriteLogToFile($"检测到已运行实例，尝试通过IPC发送图片: {imageFile}", LogHelper.LogType.Event);
+
+                        if (FileAssociationManager.TrySendImageViewerFileToExistingInstance(imageFile))
+                        {
+                            LogHelper.WriteLogToFile("图片路径已通过IPC发送给已运行实例", LogHelper.LogType.Event);
+                        }
+                        else
+                        {
+                            LogHelper.WriteLogToFile("通过IPC发送图片路径失败", LogHelper.LogType.Warning);
+                        }
+                    }
                     // 检查是否有--board参数
                     else if (hasBoardArg)
                     {
@@ -2164,6 +2181,21 @@ namespace Ink_Canvas
             MemoryBreakdownHelper.StopAutomaticDumpMonitor();
 
             CleanupTerminationMonitoring();
+
+            // 关闭所有内置图片查看器窗口：让它们各自把批注落盘、记住窗口位置。
+            try
+            {
+                int viewerCount = Ink_Canvas.Windows.ImageViewerManager.OpenWindows.Count;
+                if (viewerCount > 0)
+                {
+                    LogHelper.WriteLogToFile($"[Exit] 关闭 {viewerCount} 个图片查看器窗口", LogHelper.LogType.Info);
+                    Ink_Canvas.Windows.ImageViewerManager.CloseAll();
+                }
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"关闭图片查看器窗口失败: {ex.Message}", LogHelper.LogType.Warning);
+            }
 
             try
             {

@@ -6354,6 +6354,10 @@ namespace Ink_Canvas
             UpdateToolbarComponentVisibility();
 
             SyncWinRTInkPipelineWithLogicalTool();
+
+            // 卫星画布（UI 联动批注层、内置图片查看器画布）的批注状态必须立刻跟上，
+            // 而不是等下一拍 250ms 轮询：否则从查看器点「墨迹书写」后会有可见的迟滞。
+            SyncSatelliteCanvasStateNow();
         }
 
         /// <summary>

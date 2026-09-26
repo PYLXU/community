@@ -385,6 +385,12 @@ namespace Ink_Canvas
             int generation = _uiLinkageWatchGeneration;
             _uiLinkageWatchProbing = true;
 
+            // 「树结构已变化」信号在探测发起时消费，而不是在探测完成时清零：
+            // 完成时清零会把探测期间新到的结构事件一起吞掉；而无论是否就绪都不清零，
+            // 又会让 UpdateUILinkageForegroundWatch 的节流判定永久失效（每拍都重新探测，
+            // 未绑定时表现为 4Hz 的跨进程 UIA 整树搜索）。
+            _uiLinkageWatchStructureDirty = false;
+
             Task.Run(() =>
             {
                 AutomationElement windowElement = null;
@@ -423,7 +429,6 @@ namespace Ink_Canvas
 
                     if (ready)
                     {
-                        _uiLinkageWatchStructureDirty = false;
                         // 找到区域：走与调试采样同一条绑定路径创建独立画布。
                         BindUILinkageCanvas(docElement, hwnd, windowElement, kind);
                     }

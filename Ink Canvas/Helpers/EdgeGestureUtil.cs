@@ -77,8 +77,9 @@ namespace Ink_Canvas.Helpers
 
             [FieldOffset(8)]
             private Blob blobVal;
+            /// <summary>VT_LPWSTR 的字符串指针。公开以便其它辅助类写入窗口应用标识等字符串属性。</summary>
             [FieldOffset(8)]
-            private IntPtr pwszVal;
+            public IntPtr pwszVal;
 
 
             /// <summary>

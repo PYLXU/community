@@ -294,6 +294,17 @@ Title="{x:Static props:NavStrings.Nav_SettingsWindow_Title}"
                     </ui:NavigationViewItem.Icon>
                 </ui:NavigationViewItem>
 
+                <!-- 图片查看器 -->
+                <ui:NavigationViewItem
+                    x:Name="ImageViewerPageItem"
+                    Content="{x:Static props:ImageViewerStrings.GroupTitle}"
+                    Tag="ImageViewerPage"
+                    ToolTipService.ToolTip="{x:Static props:ImageViewerStrings.MasterToggleHint}">
+                    <ui:NavigationViewItem.Icon>
+                        <ui:FontIcon Icon="{x:Static ui:SegoeFluentIcons.Photo}"/>
+                    </ui:NavigationViewItem.Icon>
+                </ui:NavigationViewItem>
+
                 <!-- 更新设置 -->
                 <ui:NavigationViewItem
                     x:Name="UpdatePageItem"
