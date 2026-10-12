@@ -504,6 +504,16 @@ namespace Ink_Canvas
             {
                 if (BoothPopup != null)
                     AnimationsHelper.HidePopupWithSlideAndFade(BoothPopup);
+
+                // 预览从未真正启动过（没摄像头 / 设备打不开）时，只收起菜单会把展台的特殊模式
+                // 留在原地：#333333 全屏遮罩 + "未检测到摄像头设备" 占位文字仍在，翻页与常规白板
+                // 操作全部失效，用户看到的正是"卡死"，只能退出白板才能恢复。
+                // 这种情况下点 X 的意图就是退出展台，直接走完整退出；
+                // 预览正常时仍保持"X 只收起菜单"的原语义。
+                if (_isVideoPresenterSpecialMode && !_boothMediaOpened)
+                {
+                    BtnExitVideoPresenter_Click(null, null);
+                }
             };
             // 注意：此处不恢复 PhotoCorrectionAccelerationComboBox.SelectedIndex，
             // 因为 WireUpBoothPopupContentEvents 在 LoadSettings 之前调用，Settings 仍为默认值。
@@ -762,7 +772,16 @@ namespace Ink_Canvas
             timeMachine.OnUndoStateChanged += TimeMachine_OnUndoStateChanged;
             inkCanvas.Strokes.StrokesChanged += StrokesOnStrokesChanged;
 
-            SystemEvents.UserPreferenceChanged += SystemEvents_UserPreferenceChanged;
+            // SystemEvents 依赖消息泵/桌面窗口，在 UIAccess 降权子进程等特殊上下文下会抛
+            // PlatformNotSupportedException；订阅失败降级，不阻断后续初始化。
+            try
+            {
+                SystemEvents.UserPreferenceChanged += SystemEvents_UserPreferenceChanged;
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"MainWindow | 订阅系统主题变化失败，已降级: {ex.Message}", LogHelper.LogType.Warning);
+            }
             try
             {
                 if (File.Exists("SpecialVersion.ini")) SpecialVersionResetToSuggestion_Click();
@@ -1620,7 +1639,15 @@ namespace Ink_Canvas
                 }), DispatcherPriority.ContextIdle);
             }
 
-            SystemEvents.DisplaySettingsChanged += SystemEventsOnDisplaySettingsChanged;
+            // SystemEvents 在 UIAccess 降权子进程等特殊上下文下会抛 PlatformNotSupportedException，订阅失败降级。
+            try
+            {
+                SystemEvents.DisplaySettingsChanged += SystemEventsOnDisplaySettingsChanged;
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"MainWindow | 订阅显示设置变化失败，已降级: {ex.Message}", LogHelper.LogType.Warning);
+            }
             // 自动收纳到侧边栏（若通过 --board 进入白板模式或 --show 参数则跳过收纳）
             if (Settings.Startup.IsFoldAtStartup && !App.StartWithBoardMode && !App.StartWithShowMode)
             {
@@ -1879,8 +1906,10 @@ namespace Ink_Canvas
                                 _allowCloseAfterExitVerification = true;
                                 Close();
                             }
-                            catch
+                            catch (Exception ex)
                             {
+                                // 走到这里说明验证流程中途失败且未置位放行标志，窗口会表现为"点关闭没反应"
+                                LogHelper.WriteLogToFile($"[Exit] 退出密码验证流程异常，本次关闭未放行: {ex.Message}", LogHelper.LogType.Info);
                             }
                             finally
                             {
@@ -1890,8 +1919,9 @@ namespace Ink_Canvas
                         return;
                     }
                 }
-                catch
+                catch (Exception ex)
                 {
+                    LogHelper.WriteLogToFile($"[Exit] 检查是否需要退出密码验证失败: {ex.Message}", LogHelper.LogType.Info);
                 }
 
                 if (!CloseIsFromButton && Settings.Advanced.IsSecondConfirmWhenShutdownApp)
@@ -1967,8 +1997,15 @@ namespace Ink_Canvas
         {
             LogHelper.WriteLogToFile("[Exit] 主窗口 Closed，开始释放资源", LogHelper.LogType.Info);
             RealtimeInkFrameScheduler.Clear();
-            SystemEvents.DisplaySettingsChanged -= SystemEventsOnDisplaySettingsChanged;
-            SystemEvents.UserPreferenceChanged -= SystemEvents_UserPreferenceChanged;
+            try
+            {
+                SystemEvents.DisplaySettingsChanged -= SystemEventsOnDisplaySettingsChanged;
+                SystemEvents.UserPreferenceChanged -= SystemEvents_UserPreferenceChanged;
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"MainWindow | 取消系统事件订阅失败: {ex.Message}", LogHelper.LogType.Warning);
+            }
             _systemThemeRetryTimer?.Stop();
             // 玻璃浮动栏刻意不设 Owner，必须显式关闭，否则残留窗口会挡住进程退出
             HideLiquidGlassBar();
