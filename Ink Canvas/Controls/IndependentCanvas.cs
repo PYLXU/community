@@ -950,6 +950,12 @@ namespace Ink_Canvas.Controls
         /// <param name="animate">true 时墨迹以平滑过渡动画跟随滚动；false 时立即贴合。</param>
         public void SetScrollInfo(Size viewport, Size extent, Vector offset, bool animate = true)
         {
+            // 非有限偏移（NaN/∞）来自目标应用读数瞬时越界；直接采信会污染 _scrollX/_scrollY，
+            // 并把 NaN/∞ 平移烘焙进笔迹数据导致墨迹永久消失。这里整拍丢弃，等下一拍好读数。
+            if (double.IsNaN(offset.X) || double.IsInfinity(offset.X)
+                || double.IsNaN(offset.Y) || double.IsInfinity(offset.Y))
+                return;
+
             double deltaX = offset.X - _scrollX;
             double deltaY = offset.Y - _scrollY;
             _scrollX = offset.X;
@@ -1119,6 +1125,11 @@ namespace Ink_Canvas.Controls
         /// </summary>
         protected void ApplyInkTransform(Matrix matrix)
         {
+            // 非有限矩阵（含 NaN/∞）会把笔迹点集腐蚀成 NaN —— 一旦烘焙进 Stroke 数据便无法
+            // 渲染、也无法恢复，表现为「整块墨迹凭空消失」。滚动/缩放读数瞬时越界都可能
+            // 产生这种矩阵，这里作为唯一入口兜底丢弃，宁可不移动也不腐蚀笔迹。
+            if (!IsFinite(matrix)) return;
+
             // 渐隐视觉与笔迹同坐标系，必须同步变换，否则渐隐中的笔迹会与墨迹错位。
             _fadeLayerMatrix = _fadeLayerMatrix * matrix;
             _fadeLayerTransform.Matrix = _fadeLayerMatrix;
@@ -1128,6 +1139,15 @@ namespace Ink_Canvas.Controls
             foreach (Stroke stroke in _inkCanvas.Strokes)
                 stroke.Transform(matrix, false);
         }
+
+        /// <summary>矩阵各分量（含偏移）是否均为有限值。</summary>
+        private static bool IsFinite(Matrix m)
+            => !double.IsNaN(m.M11) && !double.IsInfinity(m.M11)
+            && !double.IsNaN(m.M12) && !double.IsInfinity(m.M12)
+            && !double.IsNaN(m.M21) && !double.IsInfinity(m.M21)
+            && !double.IsNaN(m.M22) && !double.IsInfinity(m.M22)
+            && !double.IsNaN(m.OffsetX) && !double.IsInfinity(m.OffsetX)
+            && !double.IsNaN(m.OffsetY) && !double.IsInfinity(m.OffsetY);
 
         /// <summary>
         /// 背景层（图片底图等）：位于墨迹之下、与墨迹同坐标系。
@@ -1183,20 +1203,26 @@ namespace Ink_Canvas.Controls
         }
 
         /// <summary>
-        /// 裁剪内容宿主（墨迹、边框）的被遮挡区域。仅影响渲染（OpacityMask 实现），
-        /// 不影响命中测试：被短暂遮挡（如录屏软件覆盖层）时输入仍由本画布接收，
-        /// 墨迹不会误落到主画布。传 null 清除裁剪。
+        /// 裁剪内容宿主（墨迹、边框）的被遮挡区域。
+        /// <para>
+        /// 同时设置 <see cref="UIElement.Clip"/> 与 <see cref="UIElement.OpacityMask"/>：
+        /// OpacityMask 负责把遮挡区域渲染为透明（视觉隐藏）；Clip 除渲染裁剪外还会裁剪
+        /// 命中测试，使遮挡区域的书写/擦除输入穿透到下层主画布（非独立画布）——
+        /// 用户正对着的是盖在目标窗口之上的那层窗口，批注应落到主画布而不是 Word 联动层。
+        /// </para>
+        /// 传 null 同时清除两者，恢复 <c>ClipToBounds</c> 的默认行为。
         /// </summary>
         public void SetClip(Geometry clip)
         {
             if (clip == null)
             {
-                if (_contentHost.OpacityMask == null) return;
-                _contentHost.OpacityMask = null;
+                if (_contentHost.OpacityMask != null) _contentHost.OpacityMask = null;
+                if (_contentHost.Clip != null) _contentHost.Clip = null;
                 return;
             }
 
             // 白色几何 = 可见区域，其余透明 = 遮挡区域；几何坐标即内容宿主本地坐标。
+            _contentHost.Clip = clip;
             _contentHost.OpacityMask = new DrawingBrush
             {
                 Drawing = new GeometryDrawing { Geometry = clip, Brush = Brushes.White },

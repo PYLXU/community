@@ -1785,6 +1785,11 @@ namespace Ink_Canvas
                 return;
             }
 
+            // 白板模式：白板背景覆盖整个工作区，UI 联动层隐藏（几何跟随阶段负责隐藏画布）。
+            // 此时目标窗口不可见、滚动位置也不会被用户改动，跳过滚动同步可避免读到的
+            // 瞬时垃圾偏移把隐藏画布的墨迹推飞；退出白板后下一拍自然重新对齐。
+            if (IsWhiteboardMode) return;
+
             foreach (var inst in _uiLinkageInstances.ToList())
             {
                 if (inst?.Canvas == null) continue;
@@ -1849,6 +1854,13 @@ namespace Ink_Canvas
                 }
 
                 inst.ScrollReadFailureCount = 0;
+
+                // 读数瞬时无效（NoScroll=-1 / 越界 / ∞）：缩放、重排瞬间 Word/PDF 常返回
+                // NoScroll 或离屏垃圾值，沿用会算出错误的 extH/offY，把整块墨迹瞬移甚至推离
+                // 视口（画面表现即「笔迹突然消失」）。这是常态瞬态，保持上一拍偏移不动即可，
+                // 等下一拍好读数，不累计连续失败次数（那套只用于判定窗口/视口真正失效）。
+                if (!IsUILinkageValidPercent(vp) || !IsUILinkageValidPercent(vs))
+                    continue;
 
                 var dpi = VisualTreeHelper.GetDpi(this);
                 double viewW = r.Width / dpi.DpiScaleX;
@@ -2324,6 +2336,15 @@ namespace Ink_Canvas
             foreach (var inst in _uiLinkageInstances.ToList())
             {
                 if (inst?.Canvas == null || !inst.Bound) continue;
+
+                // 白板模式：白板背景应覆盖独立画布区域，UI 联动层让位于白板。
+                // 仅临时隐藏（不解绑、不丢墨迹）；退出白板后由几何跟随自然恢复显示。
+                if (IsWhiteboardMode)
+                {
+                    if (inst.Canvas.Visibility != Visibility.Collapsed)
+                        inst.Canvas.Visibility = Visibility.Collapsed;
+                    continue;
+                }
 
                 // 目标窗口最小化：临时隐藏画布（不解除绑定、不丢失墨迹）。
                 if (UILinkageWindowFinder.IsMinimized(inst.BoundHwnd))
