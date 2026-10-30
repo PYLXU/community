@@ -113,12 +113,22 @@ namespace Ink_Canvas
             var (viewerCanvas, viewerUtc) = Ink_Canvas.Windows.ImageViewerManager.ActiveCanvasSnapshot;
             bool viewerFresh = viewerCanvas != null && now - viewerUtc <= InkActivityFreshness;
 
+            // 主画布最近落笔：三者（主画布 / UI 联动画布 / 图片查看器画布）按最近落笔取最新，
+            // 主画布最新时必须交回主画布 —— 否则「在图片上批注后回白板写字，Ctrl+Z 却撤销图片批注」。
+            bool mainFresh = _lastInkActivityTarget == InkActivityTarget.Main
+                             && now - _lastInkActivityUtc <= InkActivityFreshness;
+
             bool uiLinkageFresh = _uiLinkageHasInkActivity
                                   && _lastInkActivityTarget == InkActivityTarget.Independent
                                   && now - _lastInkActivityUtc <= InkActivityFreshness;
 
-            if (viewerFresh && (!uiLinkageFresh || viewerUtc > _lastInkActivityUtc))
-                return viewerCanvas;
+            bool viewerIsNewest = viewerFresh
+                                  && (!mainFresh || viewerUtc > _lastInkActivityUtc)
+                                  && (!uiLinkageFresh || viewerUtc > _lastInkActivityUtc);
+            if (viewerIsNewest) return viewerCanvas;
+
+            // 主画布是最近落笔目标：返回 null，让快捷键走主画布撤销。
+            if (mainFresh) return null;
 
             if (!uiLinkageFresh) return null;
 

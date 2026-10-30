@@ -288,6 +288,11 @@ namespace Ink_Canvas.Windows
             Closing += OnWindowClosing;
             Closed += OnWindowClosed;
 
+            // 查看器是独立顶层窗口，不能参与主窗口的置顶管理层（WindowTopmostManager 会周期性
+            // 扫描并强制 TOPMOST）。否则：主窗口处于置顶维护状态时，查看器会被一起抬到最前，
+            // 全屏应用退出后也可能“甩不掉”置顶。这里显式排除，由查看器自己决定 Z 序。
+            Ink_Canvas.Helpers.WindowTopmostManager.ExcludeWindow(this);
+
             _adjustReady = true;
         }
 

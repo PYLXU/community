@@ -1,4 +1,4 @@
-﻿using H.NotifyIcon;
+using H.NotifyIcon;
 using Ink_Canvas.Helpers;
 using Ink_Canvas.Plugins;
 using Ink_Canvas.Properties;
@@ -1432,6 +1432,11 @@ namespace Ink_Canvas
                 {
                     LogHelper.NewLog("Detected existing instance");
 
+                    // 图片参数不能用 SettingsManager.Settings 判定：单实例分支可能发生在设置加载之前，
+                    // 此时它仍是默认 Settings()（ImageViewer.IsEnabled=false、格式清单为空），
+                    // 会把所有图片参数过滤掉 —— 表现为「程序常驻时双击图片没反应」。
+                    string imageFile = TryResolveImageViewerFileFromArgs(e.Args);
+
                     // 检查是否有.icstk文件参数
                     string icstkFile = FileAssociationManager.GetIcstkFileFromArgs(e.Args);
                     if (!string.IsNullOrEmpty(icstkFile))
@@ -1464,11 +1469,8 @@ namespace Ink_Canvas
                         }
                     }
                     // 检查是否有图片参数（已绑定到内置图片查看器的格式）
-                    else if (!string.IsNullOrEmpty(FileAssociationManager.GetImageViewerFileFromArgs(
-                                 e.Args, Ink_Canvas.Windows.SettingsViews.Helpers.SettingsManager.Settings.ImageViewer)))
+                    else if (!string.IsNullOrEmpty(imageFile = TryResolveImageViewerFileFromArgs(e.Args)))
                     {
-                        string imageFile = FileAssociationManager.GetImageViewerFileFromArgs(
-                            e.Args, Ink_Canvas.Windows.SettingsViews.Helpers.SettingsManager.Settings.ImageViewer);
                         LogHelper.WriteLogToFile($"检测到已运行实例，尝试通过IPC发送图片: {imageFile}", LogHelper.LogType.Event);
 
                         if (FileAssociationManager.TrySendImageViewerFileToExistingInstance(imageFile))
@@ -1885,6 +1887,38 @@ namespace Ink_Canvas
                 LogHelper.WriteLogToFile($"读取 Settings.json 失败: {ex.Message}", LogHelper.LogType.Warning);
             }
             return _cachedParsedSettings;
+        }
+
+        /// <summary>
+        /// 单实例分支中解析「图片查看器」命令行参数。
+        /// <para>
+        /// 常驻实例收到双击图片拉起的第二个进程时，<see cref="SettingsManager.Settings"/> 可能仍是
+        /// 默认 <c>new Settings()</c>（设置尚未加载），其 <c>ImageViewer.IsEnabled=false</c>、
+        /// 格式清单为空，直接用当前设置匹配会把所有图片参数过滤掉，表现为「双击图片没反应」。
+        /// 因此先用内存设置匹配；匹配不到且文件存在时，直接从 Settings.json 反序列化一份只读副本再匹配。
+        /// </para>
+        /// </summary>
+        private static string TryResolveImageViewerFileFromArgs(string[] args)
+        {
+            try
+            {
+                var current = Ink_Canvas.Windows.SettingsViews.Helpers.SettingsManager.Settings?.ImageViewer;
+                string file = FileAssociationManager.GetImageViewerFileFromArgs(args, current);
+                if (!string.IsNullOrEmpty(file)) return file;
+
+                string settingsPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Configs", "Settings.json");
+                if (!File.Exists(settingsPath)) return null;
+
+                var diskSettings = JsonConvert.DeserializeObject<Settings>(File.ReadAllText(settingsPath));
+                return diskSettings == null
+                    ? null
+                    : FileAssociationManager.GetImageViewerFileFromArgs(args, diskSettings.ImageViewer);
+            }
+            catch (Exception ex)
+            {
+                LogHelper.WriteLogToFile($"单实例分支解析图片参数失败: {ex.Message}", LogHelper.LogType.Warning);
+                return null;
+            }
         }
 
         private static StartupMode GetStartupModeFromParsed(dynamic parsedSettings)
