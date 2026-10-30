@@ -72,6 +72,17 @@ namespace Ink_Canvas.Helpers
         private const int DWMWA_CLOAKED = 14;
         private const uint LWA_ALPHA = 0x2;
 
+        /// <summary>进程位数在进程生命周期内不变：避免每次读写窗口扩展样式时重复判断。</summary>
+        private static readonly bool Is64BitProcess = IntPtr.Size == 8;
+
+        /// <summary>
+        /// 类名读取的复用缓冲（每线程一份）。<see cref="GetWindowClassName"/> 在「实时识别」
+        /// 阶段可能每拍被调用，不必每次新建 <see cref="System.Text.StringBuilder"/>；
+        /// 返回值仍由 <c>ToString()</c> 新建字符串，调用方之间没有共享可变状态。
+        /// </summary>
+        [ThreadStatic]
+        private static System.Text.StringBuilder _classNameBuffer;
+
         [StructLayout(LayoutKind.Sequential)]
         private struct POINT
         {
@@ -89,7 +100,7 @@ namespace Ink_Canvas.Helpers
         }
 
         private static int GetWindowLong(IntPtr hWnd, int nIndex)
-            => IntPtr.Size == 8 ? (int)GetWindowLongPtr64(hWnd, nIndex) : GetWindowLong32(hWnd, nIndex);
+            => Is64BitProcess ? (int)GetWindowLongPtr64(hWnd, nIndex) : GetWindowLong32(hWnd, nIndex);
 
         /// <summary>DWM Cloaked（UWP 挂起、虚拟桌面隐藏等）的窗口对用户不可见。</summary>
         private static bool IsCloaked(IntPtr hwnd)
@@ -186,8 +197,23 @@ namespace Ink_Canvas.Helpers
             IntPtr capturedHwnd, IntPtr selfHwnd, System.Windows.Rect targetRect)
         {
             var result = new List<System.Windows.Rect>();
+            GetOccludedRects(capturedHwnd, selfHwnd, targetRect, result);
+            return result;
+        }
+
+        /// <summary>
+        /// 计算遮挡区域并写入调用方提供的列表（<b>会先 Clear</b>），避免每拍新建 List。
+        /// 结果内容、顺序（Z 序）与 <see cref="GetOccludedRects(IntPtr, IntPtr, System.Windows.Rect)"/>
+        /// 完全一致 —— 语义等价的重载，只为让 250ms 轮询复用缓冲。
+        /// </summary>
+        public static void GetOccludedRects(
+            IntPtr capturedHwnd, IntPtr selfHwnd, System.Windows.Rect targetRect,
+            List<System.Windows.Rect> result)
+        {
+            if (result == null) return;
+            result.Clear();
             if (capturedHwnd == IntPtr.Zero || targetRect.IsEmpty || targetRect.Width <= 0 || targetRect.Height <= 0)
-                return result;
+                return;
 
             try
             {
@@ -240,8 +266,6 @@ namespace Ink_Canvas.Helpers
             {
                 // 忽略异常，返回空集合表示无遮挡。
             }
-
-            return result;
         }
 
         private static bool IsPointInWindow(IntPtr hwnd, int x, int y)
@@ -335,7 +359,17 @@ namespace Ink_Canvas.Helpers
             if (hwnd == IntPtr.Zero) return string.Empty;
             try
             {
-                var buffer = new System.Text.StringBuilder(256);
+                var buffer = _classNameBuffer;
+                if (buffer == null)
+                {
+                    buffer = new System.Text.StringBuilder(256);
+                    _classNameBuffer = buffer;
+                }
+                else
+                {
+                    buffer.Clear();
+                }
+
                 int length = GetClassName(hwnd, buffer, buffer.Capacity);
                 return length > 0 ? buffer.ToString() : string.Empty;
             }

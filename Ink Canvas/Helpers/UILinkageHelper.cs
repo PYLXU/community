@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Windows;
 using System.Windows.Automation;
@@ -8,11 +9,26 @@ namespace Ink_Canvas.Helpers
     /// <summary>
     /// UI 联动：通过 UIAutomation 定位目标应用（首个支持 Word）的页面视口。
     /// 仅做定位与信息读取，不直接操纵目标应用；滚动监听与墨迹同步由上层负责。
+    /// <para>
+    /// 说明：当前 250ms 轮询路径（<c>MW_UILinkage</c> / <c>MW_UILinkageWatch</c>）已改用
+    /// <see cref="UILinkageScrollReader"/> + <see cref="UILinkageWindowFinder"/> 的 Win32 方案，
+    /// 本类作为 UIA 定位的备用实现保留；改动仅做「零分配」层面的整理，不影响任何调用方。
+    /// </para>
     /// </summary>
     public static class UILinkageHelper
     {
         /// <summary>Word 进程名（不含 .exe）。</summary>
         private const string WordProcessName = "WINWORD";
+
+        /// <summary>
+        /// 复用 <see cref="PropertyCondition"/>：它是不可变对象，原实现每次调用都会新建
+        /// 一个（并伴随一次 <see cref="AutomationProperty"/> 查找）。
+        /// </summary>
+        private static readonly PropertyCondition WindowControlTypeCondition =
+            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Window);
+
+        private static readonly PropertyCondition DocumentControlTypeCondition =
+            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Document);
 
         /// <summary>
         /// 查找 Word 主窗口元素（按进程名匹配顶级窗口）。找不到返回 null。
@@ -24,9 +40,13 @@ namespace Ink_Canvas.Helpers
                 var procs = Process.GetProcessesByName(WordProcessName);
                 if (procs.Length == 0) return null;
 
+                // 先收集 pid 再枚举窗口：原实现对每个窗口线性扫一遍进程数组，
+                // 改为 HashSet 后匹配是 O(1)，且不再依赖进程数组顺序。
+                var wordPids = new HashSet<int>(procs.Length);
+                foreach (var proc in procs) wordPids.Add(proc.Id);
+
                 var windows = AutomationElement.RootElement.FindAll(
-                    TreeScope.Children,
-                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Window));
+                    TreeScope.Children, WindowControlTypeCondition);
 
                 foreach (AutomationElement window in windows)
                 {
@@ -34,10 +54,7 @@ namespace Ink_Canvas.Helpers
                     try { pid = window.Current.ProcessId; }
                     catch (ElementNotAvailableException) { continue; }
 
-                    foreach (var proc in procs)
-                    {
-                        if (proc.Id == pid) return window;
-                    }
+                    if (wordPids.Contains(pid)) return window;
                 }
             }
             catch (ElementNotAvailableException)
@@ -57,9 +74,7 @@ namespace Ink_Canvas.Helpers
             if (window == null) return null;
             try
             {
-                return window.FindFirst(
-                    TreeScope.Descendants,
-                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Document));
+                return window.FindFirst(TreeScope.Descendants, DocumentControlTypeCondition);
             }
             catch (ElementNotAvailableException)
             {

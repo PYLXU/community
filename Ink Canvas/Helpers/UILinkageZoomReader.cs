@@ -56,8 +56,15 @@ namespace Ink_Canvas.Helpers
             if (el == null) return false;
             try
             {
-                string text = ReadZoomText(el);
-                if (text != null && TryParseZoom(text, out zoomPercent))
+                // 快路径：状态栏缩放指示的 Name 通常就是「NNN%」。直接从 Name 解析，
+                // 不再走「ReadZoomText 先正则取出子串 → TryParseZoom 再正则解析一次」的
+                // 两遍匹配 + 中间字符串分配（本方法由 250ms 轮询每拍调用）。
+                if (TryParseZoom(el.Current.Name, out zoomPercent)) return true;
+
+                // 次选：部分实现把百分比文本放在 ValuePattern 的 Value 里
+                //（原实现经 ReadZoomText 走的就是这条，语义保持一致）。
+                if (el.TryGetCurrentPattern(ValuePattern.Pattern, out var vpObj) && vpObj is ValuePattern vpp
+                    && TryParseZoom(vpp.Current.Value, out zoomPercent))
                     return true;
 
                 if (el.TryGetCurrentPattern(RangeValuePattern.Pattern, out var rp) && rp is RangeValuePattern rpp)
@@ -168,7 +175,9 @@ namespace Ink_Canvas.Helpers
             if (string.IsNullOrWhiteSpace(text)) return false;
             var m = ZoomRegex.Match(text);
             if (!m.Success) return false;
-            if (!double.TryParse(m.Groups[1].Value, out double v)) return false;
+            // 直接用匹配组的切片解析：原实现先取 m.Groups[1].Value（分配一个字符串）再解析，
+            // 本方法在 250ms 轮询与元素查找里都是热点。
+            if (!double.TryParse(m.Groups[1].ValueSpan, out double v)) return false;
             if (v < 10 || v > 500) return false; // Word 缩放范围 10..500，范围外按无效处理。
             zoomPercent = v;
             return true;

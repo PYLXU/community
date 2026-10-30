@@ -93,6 +93,12 @@ namespace Ink_Canvas.Helpers
         /// <summary>Word 文本区窗口类名。</summary>
         private const string WordTextAreaClassName = "_WwG";
 
+        /// <summary>
+        /// <see cref="SCROLLINFO"/> 的结构体大小（<c>cbSize</c> 成员）。只在类型初始化时算一次：
+        /// <see cref="TryGetScroll"/> 由每拍轮询调用，不必每次再走一遍 <c>Marshal.SizeOf</c>。
+        /// </summary>
+        private static readonly uint ScrollInfoCbSize = (uint)Marshal.SizeOf<SCROLLINFO>();
+
         /// <summary>读取到的滚动条原始信息。</summary>
         public readonly struct RawScrollInfo
         {
@@ -124,6 +130,8 @@ namespace Ink_Canvas.Helpers
             if (wordMainHwnd == IntPtr.Zero) return IntPtr.Zero;
 
             IntPtr found = IntPtr.Zero;
+            // 类名缓冲放在回调外复用一个：枚举期间回调是同步执行的，只在本次调用内使用。
+            var className = new StringBuilder(256);
 
             EnumChildProc callback = (hwnd, lParam) =>
             {
@@ -131,21 +139,15 @@ namespace Ink_Canvas.Helpers
                 {
                     if (!IsWindowVisible(hwnd)) return true;
 
-                    var sb = new StringBuilder(256);
-                    GetClassName(hwnd, sb, sb.Capacity);
-                    if (sb.ToString() != WordTextAreaClassName) return true;
+                    className.Clear();
+                    GetClassName(hwnd, className, className.Capacity);
+                    // 先比长度再 ToString()：绝大多数子窗口在这一步就被过滤掉，不必为它们分配字符串。
+                    if (className.Length != WordTextAreaClassName.Length
+                        || className.ToString() != WordTextAreaClassName)
+                        return true;
 
-                    // 取面积最大的 _WwG（Word 中通常只有一个，但保守处理）。
-                    if (found == IntPtr.Zero)
-                    {
-                        found = hwnd;
-                    }
-                    else
-                    {
-                        // 面积比较省略：多个 _WwG 时以最后一个可见者为准，
-                        // 实际 Word 文档区仅有一个 _WwG。
-                        found = hwnd;
-                    }
+                    // 多个 _WwG 时以最后一个可见者为准（实际 Word 文档区仅有一个 _WwG）。
+                    found = hwnd;
                 }
                 catch
                 {
@@ -175,7 +177,7 @@ namespace Ink_Canvas.Helpers
 
             var sc = new SCROLLINFO
             {
-                cbSize = (uint)Marshal.SizeOf<SCROLLINFO>(),
+                cbSize = ScrollInfoCbSize,
                 fMask = SIF_RANGE | SIF_PAGE | SIF_POS
             };
 
@@ -225,6 +227,8 @@ namespace Ink_Canvas.Helpers
 
             IntPtr found = IntPtr.Zero;
             long foundArea = 0;
+            // 类名缓冲放在回调外复用一个（回调同步执行，仅本次调用内使用）。
+            var className = new StringBuilder(256);
 
             EnumChildProc callback = (hwnd, lParam) =>
             {
@@ -232,9 +236,12 @@ namespace Ink_Canvas.Helpers
                 {
                     if (!IsWindowVisible(hwnd)) return true;
 
-                    var sb = new StringBuilder(256);
-                    GetClassName(hwnd, sb, sb.Capacity);
-                    if (sb.ToString() != SumatraCanvasClassName) return true;
+                    className.Clear();
+                    GetClassName(hwnd, className, className.Capacity);
+                    // 先比长度再 ToString()：绝大多数子窗口在这一步就被过滤掉，不必为它们分配字符串。
+                    if (className.Length != SumatraCanvasClassName.Length
+                        || className.ToString() != SumatraCanvasClassName)
+                        return true;
 
                     if (GetWindowRect(hwnd, out var r))
                     {
@@ -403,7 +410,7 @@ namespace Ink_Canvas.Helpers
 
             var sc = new SCROLLINFO
             {
-                cbSize = (uint)Marshal.SizeOf<SCROLLINFO>(),
+                cbSize = ScrollInfoCbSize,
                 fMask = SIF_RANGE | SIF_PAGE | SIF_POS
             };
             if (!GetScrollInfo(hwnd, nBar, ref sc)) return false;
