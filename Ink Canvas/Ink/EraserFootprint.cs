@@ -105,6 +105,24 @@ namespace Ink_Canvas.Ink
         }
 
         /// <summary>
+        /// 按「形状 + 宽度 + 高度」设定预览图（主画布路径）。
+        /// <para>
+        /// 与两参重载的区别：高度由调用方给出，用于「掌擦」等宽高比不遵循 38:56 的场景，
+        /// 使预览尺寸与真实参与擦除的 <see cref="StylusShape"/> 完全一致。
+        /// </para>
+        /// </summary>
+        /// <param name="circle">是否为圆形擦头。</param>
+        /// <param name="widthDip">擦头宽度（DIP）。</param>
+        /// <param name="heightDip">擦头高度（DIP）。</param>
+        public void ApplyShape(bool circle, double widthDip, double heightDip)
+        {
+            ApplyCore(
+                circle ? EllipseImageKey : RectangleImageKey,
+                Math.Max(widthDip, MinDisplaySize),
+                Math.Max(heightDip, MinDisplaySize));
+        }
+
+        /// <summary>
         /// 按真正用于擦除的 <paramref name="shape"/> 设定预览图（卫星画布路径）。
         /// </summary>
         /// <param name="shape">擦除实际使用的 <see cref="StylusShape"/>（来自主画布同步）。</param>
@@ -135,8 +153,10 @@ namespace Ink_Canvas.Ink
         /// <summary>把擦头预览居中到视口坐标 <paramref name="center"/>。</summary>
         public void MoveTo(Point center)
         {
-            double width = _image.ActualWidth > 0 ? _image.ActualWidth : _image.Width;
-            double height = _image.ActualHeight > 0 ? _image.ActualHeight : _image.Height;
+            // 显式尺寸优先：折叠或刚改尺寸时 ActualWidth/ActualHeight 可能仍是 0 或旧值，
+            // 直接用会让擦头图标偏离触点（上游同类修复，此处统一到共用实现）。
+            double width = _image.Width > 0 ? _image.Width : _image.ActualWidth;
+            double height = _image.Height > 0 ? _image.Height : _image.ActualHeight;
 
             _translate.X = center.X - width / 2;
             _translate.Y = center.Y - height / 2;

@@ -4512,6 +4512,10 @@ namespace Ink_Canvas
 
             var item = timeMachine.Undo();
             ApplyHistoryToCanvas(item);
+            if (IsBoardRoamingMode)
+            {
+                RefreshBoardRoamingPopup();
+            }
         }
 
         /// <summary>
@@ -4529,6 +4533,10 @@ namespace Ink_Canvas
 
             var item = timeMachine.Redo();
             ApplyHistoryToCanvas(item);
+            if (IsBoardRoamingMode)
+            {
+                RefreshBoardRoamingPopup();
+            }
         }
 
         /// <summary>
@@ -4711,8 +4719,7 @@ namespace Ink_Canvas
                 // 清空触摸点计数器
                 dec.Clear();
 
-                if (isPalmEraserActive)
-                    isPalmEraserActive = false;
+                ResetPalmEraser();
 
                 // 确保触摸事件能正常响应
                 inkCanvas.IsHitTestVisible = true;
@@ -6341,6 +6348,11 @@ namespace Ink_Canvas
         /// <param name="mode">模式名称</param>
         private void UpdateCurrentToolMode(string mode)
         {
+            if (!string.Equals(mode, "roaming", StringComparison.Ordinal) && IsBoardRoamingMode)
+            {
+                EndBoardRoaming();
+                ResetBoardRoamingContactState();
+            }
             _currentToolMode = NormalizeToolModeForFreeze(mode);
 
             // 工具切换为非笔模式（橡皮/框选/图形/漫游/鼠标）时，扩展画布提示立即消失

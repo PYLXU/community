@@ -206,6 +206,8 @@ namespace Ink_Canvas.Properties
 
         public static string Theme_HideFloatingBarBorderHint => ResourceManager.GetString(nameof(Theme_HideFloatingBarBorderHint), _resourceCulture);
 
+        public static string Theme_FlipContentOnAutoFlip => ResourceManager.GetString(nameof(Theme_FlipContentOnAutoFlip), _resourceCulture);
+
         public static string Theme_ColorfulFloatingBar => ResourceManager.GetString(nameof(Theme_ColorfulFloatingBar), _resourceCulture);
 
         public static string Theme_ColorfulFloatingBarHint => ResourceManager.GetString(nameof(Theme_ColorfulFloatingBarHint), _resourceCulture);
@@ -213,6 +215,18 @@ namespace Ink_Canvas.Properties
         public static string Theme_FloatingBarBorderColor => ResourceManager.GetString(nameof(Theme_FloatingBarBorderColor), _resourceCulture);
 
         public static string Theme_FloatingBarBorderColorHint => ResourceManager.GetString(nameof(Theme_FloatingBarBorderColorHint), _resourceCulture);
+
+        public static string Theme_FloatingBarShadow => ResourceManager.GetString(nameof(Theme_FloatingBarShadow), _resourceCulture);
+
+        public static string Theme_FloatingBarShadowHint => ResourceManager.GetString(nameof(Theme_FloatingBarShadowHint), _resourceCulture);
+
+        public static string Theme_FloatingBarShadowSize => ResourceManager.GetString(nameof(Theme_FloatingBarShadowSize), _resourceCulture);
+
+        public static string Theme_PPTNavBarShadow => ResourceManager.GetString(nameof(Theme_PPTNavBarShadow), _resourceCulture);
+
+        public static string Theme_PPTNavBarShadowHint => ResourceManager.GetString(nameof(Theme_PPTNavBarShadowHint), _resourceCulture);
+
+        public static string Theme_PPTNavBarShadowSize => ResourceManager.GetString(nameof(Theme_PPTNavBarShadowSize), _resourceCulture);
 
         public static string Theme_FloatingBarBorderColorReset => ResourceManager.GetString(nameof(Theme_FloatingBarBorderColorReset), _resourceCulture);
 

@@ -363,6 +363,12 @@
   <data name="ToolbarPage_RedStyleDesc" xml:space="preserve">
     <value>Display this component's icon and label in red</value>
   </data>
+  <data name="ToolbarPage_RedStyleIcon" xml:space="preserve">
+    <value>Emphasize icon</value>
+  </data>
+  <data name="ToolbarPage_RedStyleText" xml:space="preserve">
+    <value>Emphasize label</value>
+  </data>
   <data name="ToolbarPage_Margin" xml:space="preserve">
     <value>Margin</value>
   </data>
@@ -620,6 +626,9 @@
   </data>
   <data name="BoardToolbarPage_GroupVideoBooth" xml:space="preserve">
     <value>Video Booth</value>
+  </data>
+  <data name="BoardToolbarPage_ShowInBoothOnly" xml:space="preserve">
+    <value>Show only in Video Booth mode</value>
   </data>
   <data name="BoardToolbarPage_GroupGesture" xml:space="preserve">
     <value>Gesture &amp; Background</value>

@@ -97,14 +97,32 @@ namespace Ink_Canvas
         /// 更新橡皮擦样式（擦头足迹预览）。
         /// 实际绘制交给共用的 <see cref="Ink_Canvas.Ink.EraserFootprint"/>。
         /// </summary>
+        /// <summary>
+        /// 当前擦头的真实高度（DIP）：与 <see cref="CreateGeometryEraserShape"/> 完全一致，
+        /// 保证「擦头预览」与「实际擦除范围」使用同一套尺寸换算。
+        /// </summary>
+        private double GetGeometryEraserHeight()
+        {
+            return isPalmEraserActive ? _palmHeight
+                : isEraserCircleShape ? eraserWidth : eraserWidth * 56.0 / 38.0;
+        }
+
         private void UpdateEraserStyle()
         {
-            eraserFootprint?.ApplyShape(isEraserCircleShape, eraserWidth);
+            eraserFootprint?.ApplyShape(isEraserCircleShape, eraserWidth, GetGeometryEraserHeight());
         }
 
         /// <summary>
         /// 橡皮擦按下事件处理
         /// </summary>
+        private StylusShape CreateGeometryEraserShape()
+        {
+            double height = GetGeometryEraserHeight();
+            return isEraserCircleShape
+                ? new EllipseStylusShape(eraserWidth, height)
+                : new RectangleStylusShape(eraserWidth, height);
+        }
+
         private void EraserOverlay_PointerDown(object sender)
         {
             _secAgentEraseInitialStates.Clear();
@@ -121,25 +139,18 @@ namespace Ink_Canvas
             isUsingGeometryEraser = true;
 
             // 计算高度
-            var _h = eraserWidth * 56 / 38;
+            var _h = isPalmEraserActive ? _palmHeight
+                : isEraserCircleShape ? eraserWidth : eraserWidth * 56 / 38;
 
             // 初始化碰撞检测器
-            StylusShape eraserShape;
-            if (isEraserCircleShape)
-            {
-                eraserShape = new EllipseStylusShape(eraserWidth, eraserWidth);
-            }
-            else
-            {
-                eraserShape = new RectangleStylusShape(eraserWidth, _h);
-            }
-
-            hitTester = inkCanvas.Strokes.GetIncrementalStrokeHitTester(eraserShape);
+            hitTester = inkCanvas.Strokes.GetIncrementalStrokeHitTester(CreateGeometryEraserShape());
             hitTester.StrokeHit += EraserGeometry_StrokeHit;
 
             // UI 联动：独立画布实例在首次移动时按点位解析（支持多实例），再为其墨迹
             // 建立独立的增量命中测试器，使面积擦同样作用于其上。
-            _uiLinkageEraserShape = eraserShape;
+            // 上游已把形状构造收敛到 CreateGeometryEraserShape（含掌擦高度语义），
+            // 这里同样复用，避免主画布与联动画布擦头尺寸不一致。
+            _uiLinkageEraserShape = CreateGeometryEraserShape();
             uiLinkageHitTester = null;
             _uiLinkageEraseInstance = null;
 
@@ -152,7 +163,9 @@ namespace Ink_Canvas
             // 设置橡皮擦反馈大小（共用实现内部按 38:56 比例换算并重新测量）
             if (eraserFootprint != null)
             {
-                eraserFootprint.ApplyShape(isEraserCircleShape, eraserWidth);
+                // 合并上游「掌擦」高度语义：_h 已按「掌擦 / 圆形 / 矩形」分别计算，
+                // 视觉层仍走本地共用的 EraserFootprint（主画布与独立画布同一份实现）。
+                eraserFootprint.ApplyShape(isEraserCircleShape, eraserWidth, _h);
                 eraserFootprint.Hide();
             }
         }
@@ -236,7 +249,9 @@ namespace Ink_Canvas
                     eraserFootprint.Show();
                 }
 
-                // 更新橡皮擦位置
+                // 更新橡皮擦位置。居中对齐所需的「显式尺寸优先」逻辑已下沉到
+                // EraserFootprint.MoveTo（吸收上游修复：折叠或刚改尺寸时
+                // ActualWidth/ActualHeight 可能仍是 0/旧值，直接用会让图标偏离触点）。
                 eraserFootprint?.MoveTo(pt);
 
                 // 添加点到碰撞检测器

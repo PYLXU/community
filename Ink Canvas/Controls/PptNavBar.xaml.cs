@@ -4,6 +4,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
 
 namespace Ink_Canvas.Controls
@@ -97,7 +98,27 @@ namespace Ink_Canvas.Controls
         public PPTNavBar()
         {
             InitializeComponent();
+            _shadowEffect = RootBorder.Effect as DropShadowEffect;
             ApplyDirection(Direction);
+        }
+
+        private readonly DropShadowEffect _shadowEffect;
+
+        /// <summary>
+        /// 应用翻页按钮的四边投影阴影（Issue #569）：enabled 控制开关，blurRadius 控制阴影大小。
+        /// 阴影效果定义在 RootBorder 上。
+        /// </summary>
+        public void SetShadow(bool enabled, double blurRadius)
+        {
+            if (_shadowEffect == null) return;
+            _shadowEffect.BlurRadius = blurRadius;
+            RootBorder.Effect = enabled ? _shadowEffect : null;
+        }
+
+        public void ApplyShadowSettings(PowerPointSettings settings)
+        {
+            var shadow = settings.GetPPTNavBarShadow(Direction);
+            SetShadow(shadow.Enabled, shadow.Size);
         }
 
         private static void OnDirectionChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
@@ -395,7 +416,11 @@ namespace Ink_Canvas.Controls
             ApplyRootOpacity();
         }
 
-        private void ApplyRootOpacity() => RootBorder.Opacity = IsPreviewExpanded ? 1 : _collapsedOpacity;
+        // 透明度必须作用在带 DropShadowEffect 的 RootBorder 的祖先上（这里用控件自身），
+        // 与浮动栏（ViewboxFloatingBar.Opacity + 子级阴影）保持一致。
+        // 若把 Opacity 和 Effect 放在同一个元素上，WPF 会先按半透明轮廓生成阴影，
+        // 阴影透过样式半透明的填充显示出来，背景就会发灰发脏。
+        private void ApplyRootOpacity() => Opacity = IsPreviewExpanded ? 1 : _collapsedOpacity;
 
         public void SetBarScale(double scale)
         {

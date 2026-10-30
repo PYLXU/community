@@ -197,6 +197,12 @@ namespace Ink_Canvas.Windows.SettingsViews
             RightSidePanelForPPTNavigation.ApplyTheme(rsBlackBg);
             LeftBottomPanelForPPTNavigation.ApplyTheme(lbBlackBg);
             RightBottomPanelForPPTNavigation.ApplyTheme(rbBlackBg);
+
+            // 7. Apply shadow (Issue #569)
+            LeftSidePanelForPPTNavigation.ApplyShadowSettings(ppt);
+            RightSidePanelForPPTNavigation.ApplyShadowSettings(ppt);
+            LeftBottomPanelForPPTNavigation.ApplyShadowSettings(ppt);
+            RightBottomPanelForPPTNavigation.ApplyShadowSettings(ppt);
         }
     }
 }

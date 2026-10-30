@@ -363,6 +363,12 @@
   <data name="ToolbarPage_RedStyleDesc" xml:space="preserve">
     <value>将该组件的图标和文字显示为红色</value>
   </data>
+  <data name="ToolbarPage_RedStyleIcon" xml:space="preserve">
+    <value>强调图标</value>
+  </data>
+  <data name="ToolbarPage_RedStyleText" xml:space="preserve">
+    <value>强调文字</value>
+  </data>
   <data name="ToolbarPage_Margin" xml:space="preserve">
     <value>边距</value>
   </data>
@@ -620,6 +626,9 @@
   </data>
   <data name="BoardToolbarPage_GroupVideoBooth" xml:space="preserve">
     <value>视频展台</value>
+  </data>
+  <data name="BoardToolbarPage_ShowInBoothOnly" xml:space="preserve">
+    <value>仅在视频展台模式显示</value>
   </data>
   <data name="BoardToolbarPage_GroupGesture" xml:space="preserve">
     <value>手势与背景</value>

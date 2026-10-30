@@ -92,7 +92,7 @@ namespace Ink_Canvas.Windows.SettingsViews.Pages
             // 加载自动翻转后翻转组件内容设置
             if (ToggleSwitchFlipContentOnAutoFlip != null)
             {
-                ToggleSwitchFlipContentOnAutoFlip.IsOn = settings.Appearance.FlipContentOnAutoFlip;
+                ToggleSwitchFlipContentOnAutoFlip.IsChecked = settings.Appearance.FlipContentOnAutoFlip;
             }
 
             // 加载禁止工具栏动画设置
@@ -119,7 +119,13 @@ namespace Ink_Canvas.Windows.SettingsViews.Pages
 
             // 加载隐藏浮动栏边框设置
             if (ToggleSwitchHideFloatingBarBorder != null)
-                ToggleSwitchHideFloatingBarBorder.IsOn = settings.Appearance.HideFloatingBarBorder;
+                ToggleSwitchHideFloatingBarBorder.IsChecked = settings.Appearance.HideFloatingBarBorder;
+
+            // 加载浮动栏阴影设置
+            if (ToggleSwitchFloatingBarShadow != null)
+                ToggleSwitchFloatingBarShadow.IsOn = settings.Appearance.EnableFloatingBarShadow;
+            if (FloatingBarShadowSizeSlider != null)
+                FloatingBarShadowSizeSlider.Value = settings.Appearance.FloatingBarShadowSize;
 
             // 加载浮动栏边框颜色设置
             int mode = settings.Appearance.FloatingBarBorderColorMode;
@@ -138,6 +144,7 @@ namespace Ink_Canvas.Windows.SettingsViews.Pages
             UpdateSliderText(IdleMiniBarOpacitySlider, IdleMiniBarOpacityText, "{0:F2}");
             UpdateSliderText(IdleMiniBarAutoRestoreSlider, IdleMiniBarAutoRestoreText, "{0:F0}s");
             UpdateSliderText(LiquidGlassBarOpacitySlider, LiquidGlassBarOpacityText, "{0:F2}");
+            UpdateSliderText(FloatingBarShadowSizeSlider, FloatingBarShadowSizeText, "{0:F0}");
             UpdateFloatingBarActualScaleText();
         }
 
@@ -246,7 +253,7 @@ namespace Ink_Canvas.Windows.SettingsViews.Pages
             if (!_isLoaded) return;
             if (ToggleSwitchFlipContentOnAutoFlip == null) return;
 
-            SettingsManager.Settings.Appearance.FlipContentOnAutoFlip = ToggleSwitchFlipContentOnAutoFlip.IsOn;
+            SettingsManager.Settings.Appearance.FlipContentOnAutoFlip = ToggleSwitchFlipContentOnAutoFlip.IsChecked == true;
             SettingsManager.SaveSettingsToFile();
         }
 
@@ -297,9 +304,26 @@ namespace Ink_Canvas.Windows.SettingsViews.Pages
         private void ToggleSwitchHideFloatingBarBorder_Toggled(object sender, RoutedEventArgs e)
         {
             if (!_isLoaded) return;
-            SettingsManager.Settings.Appearance.HideFloatingBarBorder = ToggleSwitchHideFloatingBarBorder.IsOn;
+            SettingsManager.Settings.Appearance.HideFloatingBarBorder = ToggleSwitchHideFloatingBarBorder.IsChecked == true;
             SettingsManager.SaveSettingsToFile();
-            SettingsActionHub.OnHideFloatingBarBorderChanged(ToggleSwitchHideFloatingBarBorder.IsOn);
+            SettingsActionHub.OnHideFloatingBarBorderChanged(ToggleSwitchHideFloatingBarBorder.IsChecked == true);
+        }
+
+        private void ToggleSwitchFloatingBarShadow_Toggled(object sender, RoutedEventArgs e)
+        {
+            if (!_isLoaded) return;
+            SettingsManager.Settings.Appearance.EnableFloatingBarShadow = ToggleSwitchFloatingBarShadow.IsOn;
+            SettingsManager.SaveSettingsToFile();
+            SettingsActionHub.OnFloatingBarShadowChanged();
+        }
+
+        private void FloatingBarShadowSizeSlider_ValueChanged(object sender, RoutedEventArgs e)
+        {
+            UpdateSliderText(FloatingBarShadowSizeSlider, FloatingBarShadowSizeText, "{0:F0}");
+            if (!_isLoaded) return;
+            SettingsManager.Settings.Appearance.FloatingBarShadowSize = FloatingBarShadowSizeSlider.Value;
+            SettingsManager.SaveSettingsToFile();
+            SettingsActionHub.OnFloatingBarShadowChanged();
         }
 
         /// <summary>

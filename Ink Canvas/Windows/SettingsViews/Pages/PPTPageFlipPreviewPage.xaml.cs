@@ -9,6 +9,7 @@ using Windows.Win32.Foundation;
 using Windows.Win32.UI.WindowsAndMessaging;
 using NavigationViewPaneDisplayMode = iNKORE.UI.WPF.Modern.Controls.NavigationViewPaneDisplayMode;
 using Page = iNKORE.UI.WPF.Modern.Controls.Page;
+using NavDirection = Ink_Canvas.Controls.PPTNavBar.NavDirection;
 
 namespace Ink_Canvas.Windows.SettingsViews.Pages
 {
@@ -244,6 +245,66 @@ namespace Ink_Canvas.Windows.SettingsViews.Pages
             _isLoaded = wasLoaded;
         }
 
+        /// <summary>
+        /// 加载当前标签的有效阴影设置；跟随全局时仅显示全局值。
+        /// </summary>
+        private void LoadShadowSettings()
+        {
+            bool wasLoaded = _isLoaded;
+            _isLoaded = false;
+            var ppt = SettingsManager.Settings.PowerPointSettings;
+            var shadow = IsGlobalTabSelected
+                ? (Enabled: ppt.EnablePPTNavBarShadow, Size: ppt.PPTNavBarShadowSize)
+                : ppt.GetPPTNavBarShadow(GetSelectedShadowDirection());
+            ToggleSwitchPPTNavBarShadow.IsOn = shadow.Enabled;
+            SliderPPTNavBarShadowSize.Value = shadow.Size;
+            UpdateSliderText(SliderPPTNavBarShadowSize, TextBlockPPTNavBarShadowSizeValue, "{0:F0}");
+            _isLoaded = wasLoaded;
+        }
+
+        private void ToggleSwitchPPTNavBarShadow_Toggled(object sender, RoutedEventArgs e)
+        {
+            if (!_isLoaded || !PositionSettingsPanel.IsEnabled) return;
+            SaveSelectedShadowSettings();
+            SettingsManager.SaveSettingsToFile();
+            SettingsActionHub.OnPPTNavBarShadowChanged();
+            UpdatePreviews();
+        }
+
+        private void SliderPPTNavBarShadowSize_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+        {
+            UpdateSliderText(SliderPPTNavBarShadowSize, TextBlockPPTNavBarShadowSizeValue, "{0:F0}");
+            if (!_isLoaded || !PositionSettingsPanel.IsEnabled) return;
+            SaveSelectedShadowSettings();
+            SettingsActionHub.OnPPTNavBarShadowChanged();
+            UpdatePreviews();
+            _sliderDelayAction.DebounceAction(2000, null, () => SettingsManager.SaveSettingsToFile());
+        }
+
+        private NavDirection GetSelectedShadowDirection() => GetSelectedPositionIndex() switch
+        {
+            0 => NavDirection.LeftSide,
+            1 => NavDirection.RightSide,
+            2 => NavDirection.LeftBottom,
+            3 => NavDirection.RightBottom,
+            _ => throw new InvalidOperationException("No PPT navigation position is selected.")
+        };
+
+        private void SaveSelectedShadowSettings()
+        {
+            var ppt = SettingsManager.Settings.PowerPointSettings;
+            if (IsGlobalTabSelected)
+            {
+                ppt.EnablePPTNavBarShadow = ToggleSwitchPPTNavBarShadow.IsOn;
+                ppt.PPTNavBarShadowSize = SliderPPTNavBarShadowSize.Value;
+            }
+            else
+            {
+                ppt.SetPPTNavBarShadow(GetSelectedShadowDirection(),
+                    ToggleSwitchPPTNavBarShadow.IsOn, SliderPPTNavBarShadowSize.Value);
+            }
+        }
+
         private void LoadPositionSettings()
         {
             var ppt = SettingsManager.Settings.PowerPointSettings;
@@ -320,6 +381,7 @@ namespace Ink_Canvas.Windows.SettingsViews.Pages
                 : (useGlobal ? ppt.PPTNavBarScale : GetPositionScale(selectedIndex, ppt));
             SliderScale.Value = effectiveScale;
             UpdateSliderText(SliderScale, TextBlockScaleValue, "{0:F2}");
+            LoadShadowSettings();
         }
 
         private string GetPositionName(int index)
@@ -569,6 +631,12 @@ namespace Ink_Canvas.Windows.SettingsViews.Pages
             PreviewRS.ApplyTheme(rsBlackBg);
             PreviewLB.ApplyTheme(lbBlackBg);
             PreviewRB.ApplyTheme(rbBlackBg);
+
+            // 7. Apply shadow (Issue #569)
+            PreviewLS.ApplyShadowSettings(ppt);
+            PreviewRS.ApplyShadowSettings(ppt);
+            PreviewLB.ApplyShadowSettings(ppt);
+            PreviewRB.ApplyShadowSettings(ppt);
         }
 
         private void PreviewLS_MouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)

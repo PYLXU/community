@@ -363,6 +363,12 @@
   <data name="ToolbarPage_RedStyleDesc" xml:space="preserve">
     <value>让这件装备的图标和字红得发慌</value>
   </data>
+  <data name="ToolbarPage_RedStyleIcon" xml:space="preserve">
+    <value>图标变红</value>
+  </data>
+  <data name="ToolbarPage_RedStyleText" xml:space="preserve">
+    <value>文字变红</value>
+  </data>
   <data name="ToolbarPage_Margin" xml:space="preserve">
     <value>安全距离</value>
   </data>
@@ -620,6 +626,9 @@
   </data>
   <data name="BoardToolbarPage_GroupVideoBooth" xml:space="preserve">
     <value>投影法阵</value>
+  </data>
+  <data name="BoardToolbarPage_ShowInBoothOnly" xml:space="preserve">
+    <value>仅在投影法阵模式显现</value>
   </data>
   <data name="BoardToolbarPage_GroupGesture" xml:space="preserve">
     <value>结印与贴膜</value>

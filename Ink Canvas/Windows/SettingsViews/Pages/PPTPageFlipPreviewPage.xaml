@@ -184,6 +184,26 @@
                             </ikw:SimpleStackPanel>
                         </ikw:SimpleStackPanel>
 
+                        <ui:SettingsExpander x:Name="ExpanderPPTNavBarShadow"
+                                             Header="{x:Static props:ThemeStrings.Theme_PPTNavBarShadow}"
+                                             Description="{x:Static props:ThemeStrings.Theme_PPTNavBarShadowHint}"
+                                             IsEnabled="{Binding IsEnabled, ElementName=PositionSettingsPanel}"
+                                             IsExpanded="{Binding IsOn, ElementName=ToggleSwitchPPTNavBarShadow, Mode=OneWay}">
+                            <ui:ToggleSwitch x:Name="ToggleSwitchPPTNavBarShadow" d:IsOn="True"
+                                             Toggled="ToggleSwitchPPTNavBarShadow_Toggled"/>
+                            <ui:SettingsExpander.Items>
+                                <ui:SettingsCard Header="{x:Static props:ThemeStrings.Theme_PPTNavBarShadowSize}">
+                                    <ikw:SimpleStackPanel Orientation="Horizontal" Spacing="8">
+                                        <TextBlock x:Name="TextBlockPPTNavBarShadowSizeValue" VerticalAlignment="Center" FontFamily="Consolas" TextAlignment="Right" Width="40"/>
+                                        <Slider x:Name="SliderPPTNavBarShadowSize" Minimum="0" Maximum="60" Width="200"
+                                                IsSnapToTickEnabled="True" Value="16" TickFrequency="1"
+                                                TickPlacement="None" AutoToolTipPlacement="None"
+                                                ValueChanged="SliderPPTNavBarShadowSize_ValueChanged"/>
+                                    </ikw:SimpleStackPanel>
+                                </ui:SettingsCard>
+                            </ui:SettingsExpander.Items>
+                        </ui:SettingsExpander>
+
                     </ikw:SimpleStackPanel>
                 </Grid>
             </Grid>
