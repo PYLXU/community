@@ -8,15 +8,13 @@
       xmlns:ikw="http://schemas.inkore.net/lib/ui/wpf"
       xmlns:sys="clr-namespace:System;assembly=mscorlib"
       xmlns:controls="clr-namespace:Ink_Canvas.Controls;assembly=InkCanvas.Controls"
-      xmlns:c="clr-namespace:Ink_Canvas.Converter"
       mc:Ignorable="d"
       Title="{x:Static props:ImageViewerStrings.GroupTitle}">
 
     <ScrollViewer PanningMode="VerticalFirst">
         <Grid Margin="59,0,59,0">
-            <Grid.Resources>
+            <FrameworkElement.Resources>
                 <sys:Double x:Key="SettingsCardSpacing">4</sys:Double>
-                <c:BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
                 <Style x:Key="SettingsSectionHeaderTextBlockStyle"
                     BasedOn="{StaticResource BodyStrongTextBlockStyle}"
                     TargetType="TextBlock">
@@ -24,11 +22,13 @@
                         <Setter Property="Margin" Value="1,30,0,6" />
                     </Style.Setters>
                 </Style>
-            </Grid.Resources>
+            </FrameworkElement.Resources>
             <Grid>
                 <ikw:SimpleStackPanel MaxWidth="1000"
                     HorizontalAlignment="Stretch"
                     Spacing="{StaticResource SettingsCardSpacing}">
+
+                    <!-- ===================== 总开关 ===================== -->
 
                     <TextBlock Text="{x:Static props:ImageViewerStrings.GroupTitle}" Style="{StaticResource SettingsSectionHeaderTextBlockStyle}"/>
 
@@ -55,8 +55,8 @@
                             Header="{x:Static props:ImageViewerStrings.FormatsGroupHeader}"
                             Description="{x:Static props:ImageViewerStrings.FormatsHint}"
                             IsEnabled="{Binding IsOn, ElementName=CardImageViewerMaster}"
-                            d:Visibility="Visible"
-                            IsExpanded="True">
+                            IsExpanded="True"
+                            d:Visibility="Visible">
                         <ui:SettingsExpander.HeaderIcon>
                             <ui:FontIcon Icon="{x:Static ui:SegoeFluentIcons.OpenFile}" />
                         </ui:SettingsExpander.HeaderIcon>
@@ -79,6 +79,9 @@
 
                             <ui:SettingsCard Header="{x:Static props:ImageViewerStrings.CustomFormatHeader}"
                                     Description="{x:Static props:ImageViewerStrings.CustomFormatDescription}">
+                                <ui:SettingsCard.HeaderIcon>
+                                    <ui:FontIcon Icon="{x:Static ui:SegoeFluentIcons.Add}" />
+                                </ui:SettingsCard.HeaderIcon>
                                 <ikw:SimpleStackPanel Orientation="Horizontal" Spacing="8">
                                     <TextBox x:Name="TextBoxCustomFormat"
                                              Width="130"
@@ -94,94 +97,144 @@
 
                     <!-- ===================== 系统关联 ===================== -->
 
-                    <TextBlock Text="{x:Static props:ImageViewerStrings.AssociationGroupHeader}" Style="{StaticResource SettingsSectionHeaderTextBlockStyle}"/>
-
-                    <controls:LabeledSettingsCard x:Name="CardRegisterFileAssociation"
-                            Header="{x:Static props:ImageViewerStrings.RegisterFileAssociation}"
+                    <ui:SettingsExpander x:Name="ExpanderFileAssociation"
+                            Header="{x:Static props:ImageViewerStrings.AssociationGroupHeader}"
                             Description="{x:Static props:ImageViewerStrings.RegisterFileAssociationHint}"
-                            Icon="{x:Static ui:SegoeFluentIcons.Link}"
                             IsEnabled="{Binding IsOn, ElementName=CardImageViewerMaster}"
-                            Toggled="CardRegisterFileAssociation_Toggled"/>
+                            IsExpanded="True">
+                        <ui:SettingsExpander.HeaderIcon>
+                            <ui:FontIcon Icon="{x:Static ui:SegoeFluentIcons.Link}" />
+                        </ui:SettingsExpander.HeaderIcon>
+                        <ui:SettingsExpander.Items>
 
-                    <ui:SettingsCard Header="{x:Static props:ImageViewerStrings.AssociationStatusHeader}"
-                            Description="{x:Static props:ImageViewerStrings.DefaultAppHint}"
-                            IsEnabled="{Binding IsOn, ElementName=CardImageViewerMaster}">
-                        <ikw:SimpleStackPanel Orientation="Horizontal" Spacing="8">
-                            <Button x:Name="BtnApplyAssociation"
-                                    Content="{x:Static props:ImageViewerStrings.ApplyAssociation}"
-                                    Click="BtnApplyAssociation_Click" />
-                            <Button x:Name="BtnRemoveAssociation"
-                                    Content="{x:Static props:ImageViewerStrings.RemoveAssociation}"
-                                    Click="BtnRemoveAssociation_Click" />
-                            <Button x:Name="BtnOpenDefaultApps"
-                                    Content="{x:Static props:ImageViewerStrings.OpenDefaultApps}"
-                                    Click="BtnOpenDefaultApps_Click" />
-                        </ikw:SimpleStackPanel>
-                    </ui:SettingsCard>
+                            <ui:SettingsCard Header="{x:Static props:ImageViewerStrings.RegisterFileAssociation}"
+                                    IsEnabled="{Binding IsOn, ElementName=CardImageViewerMaster}">
+                                <ui:SettingsCard.HeaderIcon>
+                                    <ui:FontIcon Icon="{x:Static ui:SegoeFluentIcons.Link}" />
+                                </ui:SettingsCard.HeaderIcon>
+                                <ui:ToggleSwitch x:Name="CardRegisterFileAssociation"
+                                                 Toggled="CardRegisterFileAssociation_Toggled" />
+                            </ui:SettingsCard>
 
-                    <ui:SettingsCard ContentAlignment="Left"
-                            IsEnabled="{Binding IsOn, ElementName=CardImageViewerMaster}">
-                        <TextBlock x:Name="TextAssociationStatus" TextWrapping="Wrap" MaxWidth="620" />
-                    </ui:SettingsCard>
+                            <ui:SettingsCard Header="{x:Static props:ImageViewerStrings.AssociationStatusHeader}"
+                                    Description="{x:Static props:ImageViewerStrings.DefaultAppHint}"
+                                    IsEnabled="{Binding IsOn, ElementName=CardImageViewerMaster}">
+                                <ui:SettingsCard.HeaderIcon>
+                                    <ui:FontIcon Icon="{x:Static ui:SegoeFluentIcons.PreviewLink}" />
+                                </ui:SettingsCard.HeaderIcon>
+                                <ikw:SimpleStackPanel Orientation="Horizontal" Spacing="8">
+                                    <Button x:Name="BtnApplyAssociation"
+                                            Content="{x:Static props:ImageViewerStrings.ApplyAssociation}"
+                                            Click="BtnApplyAssociation_Click" />
+                                    <Button x:Name="BtnRemoveAssociation"
+                                            Content="{x:Static props:ImageViewerStrings.RemoveAssociation}"
+                                            Click="BtnRemoveAssociation_Click" />
+                                    <Button x:Name="BtnOpenDefaultApps"
+                                            Content="{x:Static props:ImageViewerStrings.OpenDefaultApps}"
+                                            Click="BtnOpenDefaultApps_Click" />
+                                </ikw:SimpleStackPanel>
+                            </ui:SettingsCard>
+
+                            <ui:SettingsCard ContentAlignment="Left"
+                                    IsEnabled="{Binding IsOn, ElementName=CardImageViewerMaster}">
+                                <TextBlock x:Name="TextAssociationStatus" TextWrapping="Wrap" MaxWidth="620" />
+                            </ui:SettingsCard>
+
+                        </ui:SettingsExpander.Items>
+                    </ui:SettingsExpander>
 
                     <!-- ===================== 查看器窗口 ===================== -->
 
-                    <TextBlock Text="{x:Static props:ImageViewerStrings.ViewerGroupHeader}" Style="{StaticResource SettingsSectionHeaderTextBlockStyle}"/>
-
-                    <controls:LabeledSettingsCard x:Name="CardMultiInstance"
-                            Header="{x:Static props:ImageViewerStrings.MultiInstance}"
-                            Description="{x:Static props:ImageViewerStrings.MultiInstanceHint}"
-                            Icon="{x:Static ui:SegoeFluentIcons.ViewAll}"
+                    <ui:SettingsExpander x:Name="ExpanderViewerWindow"
+                            Header="{x:Static props:ImageViewerStrings.ViewerGroupHeader}"
                             IsEnabled="{Binding IsOn, ElementName=CardImageViewerMaster}"
-                            Toggled="CardMultiInstance_Toggled"/>
+                            IsExpanded="True">
+                        <ui:SettingsExpander.HeaderIcon>
+                            <ui:FontIcon Icon="{x:Static ui:SegoeFluentIcons.View}" />
+                        </ui:SettingsExpander.HeaderIcon>
+                        <ui:SettingsExpander.Items>
 
-                    <controls:LabeledSettingsCard x:Name="CardShowInTaskbar"
-                            Header="{x:Static props:ImageViewerStrings.ShowInTaskbar}"
-                            Description="{x:Static props:ImageViewerStrings.ShowInTaskbarHint}"
-                            Icon="{x:Static ui:SegoeFluentIcons.Pin}"
-                            IsEnabled="{Binding IsOn, ElementName=CardImageViewerMaster}"
-                            Toggled="CardShowInTaskbar_Toggled"/>
+                            <ui:SettingsCard Header="{x:Static props:ImageViewerStrings.MultiInstance}"
+                                    Description="{x:Static props:ImageViewerStrings.MultiInstanceHint}"
+                                    IsEnabled="{Binding IsOn, ElementName=CardImageViewerMaster}">
+                                <ui:SettingsCard.HeaderIcon>
+                                    <ui:FontIcon Icon="{x:Static ui:SegoeFluentIcons.ViewAll}" />
+                                </ui:SettingsCard.HeaderIcon>
+                                <ui:ToggleSwitch x:Name="CardMultiInstance"
+                                                 Toggled="CardMultiInstance_Toggled" />
+                            </ui:SettingsCard>
 
-                    <controls:LabeledSettingsCard x:Name="CardRememberWindowPlacement"
-                            Header="{x:Static props:ImageViewerStrings.RememberWindowPlacement}"
-                            Description="{x:Static props:ImageViewerStrings.RememberWindowPlacementHint}"
-                            Icon="{x:Static ui:SegoeFluentIcons.View}"
-                            IsEnabled="{Binding IsOn, ElementName=CardImageViewerMaster}"
-                            Toggled="CardRememberWindowPlacement_Toggled"/>
+                            <ui:SettingsCard Header="{x:Static props:ImageViewerStrings.ShowInTaskbar}"
+                                    Description="{x:Static props:ImageViewerStrings.ShowInTaskbarHint}"
+                                    IsEnabled="{Binding IsOn, ElementName=CardImageViewerMaster}">
+                                <ui:SettingsCard.HeaderIcon>
+                                    <ui:FontIcon Icon="{x:Static ui:SegoeFluentIcons.Pin}" />
+                                </ui:SettingsCard.HeaderIcon>
+                                <ui:ToggleSwitch x:Name="CardShowInTaskbar"
+                                                 Toggled="CardShowInTaskbar_Toggled" />
+                            </ui:SettingsCard>
 
-                    <controls:LabeledSettingsCard x:Name="CardOpenFitToWindow"
-                            Header="{x:Static props:ImageViewerStrings.OpenFitToWindow}"
-                            Description="{x:Static props:ImageViewerStrings.OpenFitToWindowHint}"
-                            Icon="{x:Static ui:SegoeFluentIcons.Zoom}"
-                            IsEnabled="{Binding IsOn, ElementName=CardImageViewerMaster}"
-                            Toggled="CardOpenFitToWindow_Toggled"/>
+                            <ui:SettingsCard Header="{x:Static props:ImageViewerStrings.RememberWindowPlacement}"
+                                    Description="{x:Static props:ImageViewerStrings.RememberWindowPlacementHint}"
+                                    IsEnabled="{Binding IsOn, ElementName=CardImageViewerMaster}">
+                                <ui:SettingsCard.HeaderIcon>
+                                    <ui:FontIcon Icon="{x:Static ui:SegoeFluentIcons.History}" />
+                                </ui:SettingsCard.HeaderIcon>
+                                <ui:ToggleSwitch x:Name="CardRememberWindowPlacement"
+                                                 Toggled="CardRememberWindowPlacement_Toggled" />
+                            </ui:SettingsCard>
 
-                    <controls:LabeledSettingsCard x:Name="CardAutoSaveAnnotations"
-                            Header="{x:Static props:ImageViewerStrings.AutoSaveAnnotations}"
-                            Description="{x:Static props:ImageViewerStrings.AutoSaveAnnotationsHint}"
-                            Icon="{x:Static ui:SegoeFluentIcons.Save}"
-                            IsEnabled="{Binding IsOn, ElementName=CardImageViewerMaster}"
-                            Toggled="CardAutoSaveAnnotations_Toggled"/>
+                            <ui:SettingsCard Header="{x:Static props:ImageViewerStrings.OpenFitToWindow}"
+                                    Description="{x:Static props:ImageViewerStrings.OpenFitToWindowHint}"
+                                    IsEnabled="{Binding IsOn, ElementName=CardImageViewerMaster}">
+                                <ui:SettingsCard.HeaderIcon>
+                                    <ui:FontIcon Icon="{x:Static ui:SegoeFluentIcons.Zoom}" />
+                                </ui:SettingsCard.HeaderIcon>
+                                <ui:ToggleSwitch x:Name="CardOpenFitToWindow"
+                                                 Toggled="CardOpenFitToWindow_Toggled" />
+                            </ui:SettingsCard>
 
-                    <ui:SettingsCard Header="{x:Static props:ImageViewerStrings.BackgroundColor}"
-                            Description="{x:Static props:ImageViewerStrings.BackgroundColorHint}"
+                            <ui:SettingsCard Header="{x:Static props:ImageViewerStrings.AutoSaveAnnotations}"
+                                    Description="{x:Static props:ImageViewerStrings.AutoSaveAnnotationsHint}"
+                                    IsEnabled="{Binding IsOn, ElementName=CardImageViewerMaster}">
+                                <ui:SettingsCard.HeaderIcon>
+                                    <ui:FontIcon Icon="{x:Static ui:SegoeFluentIcons.Save}" />
+                                </ui:SettingsCard.HeaderIcon>
+                                <ui:ToggleSwitch x:Name="CardAutoSaveAnnotations"
+                                                 Toggled="CardAutoSaveAnnotations_Toggled" />
+                            </ui:SettingsCard>
+
+                            <ui:SettingsCard Header="{x:Static props:ImageViewerStrings.BackgroundColor}"
+                                    Description="{x:Static props:ImageViewerStrings.BackgroundColorHint}"
+                                    IsEnabled="{Binding IsOn, ElementName=CardImageViewerMaster}">
+                                <ui:SettingsCard.HeaderIcon>
+                                    <ui:FontIcon Icon="{x:Static ui:SegoeFluentIcons.Color}" />
+                                </ui:SettingsCard.HeaderIcon>
+                                <ikw:SimpleStackPanel Orientation="Horizontal" Spacing="8">
+                                    <Border x:Name="BorderBackgroundColorPreview"
+                                            Width="28" Height="28" CornerRadius="4"
+                                            BorderThickness="1"
+                                            BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" />
+                                    <Button x:Name="BtnPickBackgroundColor"
+                                            Content="{x:Static props:ImageViewerStrings.BackgroundColor}"
+                                            Click="BtnPickBackgroundColor_Click" />
+                                    <Button x:Name="BtnResetBackgroundColor"
+                                            Content="{x:Static props:ImageViewerStrings.ResetToDefault}"
+                                            ToolTipService.ToolTip="{x:Static props:ImageViewerStrings.ResetBackgroundColorHint}"
+                                            Click="BtnResetBackgroundColor_Click" />
+                                </ikw:SimpleStackPanel>
+                            </ui:SettingsCard>
+
+                        </ui:SettingsExpander.Items>
+                    </ui:SettingsExpander>
+
+                    <!-- ===================== 测试 ===================== -->
+
+                    <ui:SettingsCard Header="{x:Static props:ImageViewerStrings.TestOpenImage}"
                             IsEnabled="{Binding IsOn, ElementName=CardImageViewerMaster}">
-                        <ikw:SimpleStackPanel Orientation="Horizontal" Spacing="8">
-                            <Border x:Name="BorderBackgroundColorPreview"
-                                    Width="28" Height="28" CornerRadius="4"
-                                    BorderThickness="1"
-                                    BorderBrush="{DynamicResource ControlStrokeColorDefaultBrush}" />
-                            <Button x:Name="BtnPickBackgroundColor"
-                                    Content="{x:Static props:ImageViewerStrings.BackgroundColor}"
-                                    Click="BtnPickBackgroundColor_Click" />
-                            <Button x:Name="BtnResetBackgroundColor"
-                                    Content="{x:Static props:ImageViewerStrings.ResetToDefault}"
-                                    ToolTipService.ToolTip="{x:Static props:ImageViewerStrings.ResetBackgroundColorHint}"
-                                    Click="BtnResetBackgroundColor_Click" />
-                        </ikw:SimpleStackPanel>
-                    </ui:SettingsCard>
-
-                    <ui:SettingsCard Header="{x:Static props:ImageViewerStrings.TestOpenImage}">
+                        <ui:SettingsCard.HeaderIcon>
+                            <ui:FontIcon Icon="{x:Static ui:SegoeFluentIcons.Send}" />
+                        </ui:SettingsCard.HeaderIcon>
                         <Button x:Name="BtnTestOpenImage"
                                 Content="{x:Static props:ImageViewerStrings.TestOpenImage}"
                                 IsEnabled="{Binding IsOn, ElementName=CardImageViewerMaster}"
