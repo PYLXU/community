@@ -64,6 +64,9 @@ namespace Ink_Canvas.Controls
         private readonly Button _redoButton;
         private readonly IndependentInkHistory _history;
 
+        /// <summary>脏标记：自上次 <see cref="MarkInkSaved"/> 以来墨迹是否发生过变化。</summary>
+        private bool _hasUnsavedInk;
+
         // 滚动辅助按钮：左右两侧居中的上/下按钮、左下角的左/右按钮（与撤销/恢复同样式）。
         private readonly StackPanel _verticalAssistLeft;
         private readonly StackPanel _verticalAssistRight;
@@ -105,6 +108,12 @@ namespace Ink_Canvas.Controls
                 Background = Brushes.Transparent,
                 ClipToBounds = true
             };
+
+            // 收笔转发：宿主（主窗口）用它把「收笔后处理」管线（压感/笔锋/拉直/形状识别/平滑/
+            // 激光渐隐）挂到不经过 UI 联动建画布路径的卫星画布上（内置图片查看器）。
+            // 同一块画布只应由宿主挂接一次：UI 联动批注层当前是直接订阅 InkSurface.StrokeCollected
+            // 的，不要与 <see cref="StrokeCollected"/> 同时接，否则同一笔会被后处理两次。
+            _inkCanvas.StrokeCollected += (_, e) => StrokeCollected?.Invoke(this, e);
 
             // 触摸抑制（对齐主画布 InkCanvas_PreviewTouchDown 的策略）：
             // WPF 会把触摸提升为触笔事件，裸 InkCanvas 因此会把「单指拖动 / 双指手势」
@@ -172,6 +181,10 @@ namespace Ink_Canvas.Controls
 
             _history = new IndependentInkHistory(_inkCanvas);
             _history.HistoryChanged += UpdateInkButtonsState;
+            // 脏标记挂在撤销历史的变化事件上而不是 StrokesChanged 上：框选移动/缩放只改
+            // 点集、不改集合，但历史也能感知到；而滚动同步用的 Stroke.Transform 既不进历史、
+            // 也不该把画布标脏（用户只是滚动了一下文档，没有产生新的批注）。
+            _history.HistoryChanged += OnInkHistoryChanged;
             _undoButton = CreateRoundInkButton("\uE7A7", "撤销");
             _redoButton = CreateRoundInkButton("\uE7A6", "恢复");
             _undoButton.Click += (_, _) => _history.Undo();
@@ -356,11 +369,42 @@ namespace Ink_Canvas.Controls
         /// </summary>
         public Ink_Canvas.Ink.PalmContactClassifier PalmContactClassifier { get; set; }
 
+        /// <summary>
+        /// 手掌擦擦头形状工厂（入参为判定出的擦头宽度 DIP，返回 WPF 擦头形状）。
+        /// <para>
+        /// 为 null 时退化为方形 <see cref="RectangleStylusShape"/>(宽, 宽)。宿主注入与主画布一致的
+        /// 口径（圆形擦 → <see cref="EllipseStylusShape"/>；黑板擦 → 38:56 比例的矩形）后，
+        /// 卫星画布上抬掌擦除的范围与主画布完全相同，而不是固定正方形。
+        /// </para>
+        /// </summary>
+        public Func<double, StylusShape> PalmEraserShapeFactory { get; set; }
+
         /// <summary>本画布当前是否因手掌接触而处于擦除态。</summary>
         public bool IsPalmErasing { get; private set; }
 
+        /// <summary>
+        /// 输入抑制（多指手势 / 手掌擦）是否正在生效。
+        /// <para>
+        /// 供 <see cref="Helpers.IndependentCanvasStateSync"/> 判断能否安全下发主画布的编辑模式与
+        /// 擦头形状：抑制期间这两项被瞬时状态占用（多指抑制临时切 None、手掌擦临时切
+        /// EraseByPoint），每 250ms 的轮询若照抄主画布状态会把它们打断，表现为
+        /// 「第二根手指仍然落墨」或「手掌擦到一半变回画笔」。
+        /// </para>
+        /// </summary>
+        internal bool IsInputSuppressionActive => _multiTouchSuppressed || IsPalmErasing;
+
         /// <summary>进入手掌擦前的编辑模式，抬起后据此还原。</summary>
         private InkCanvasEditingMode _palmErasePreviousEditingMode = InkCanvasEditingMode.Ink;
+
+        /// <summary>
+        /// 进入手掌擦前的擦头形状，抬起后据此还原（可能为 null，表示沿用 WPF 默认擦头）。
+        /// <para>
+        /// 不能像早期实现那样在退出时把 <c>EraserShape</c> 置 null：宿主每 250ms 会用主画布的
+        /// 形状覆盖一次，置 null 会让「抬掌到下一次轮询」之间出现一段默认小擦头，
+        /// 而且 <c>EraserShape</c> 的 null 语义并非所有 WPF 版本都接受。
+        /// </para>
+        /// </summary>
+        private StylusShape _palmErasePreviousEraserShape;
 
         /// <summary>
         /// 接触面是否达到手掌阈值。口径与主画布 <c>InkCanvas_PreviewTouchDown</c> 完全一致：
@@ -397,7 +441,27 @@ namespace Ink_Canvas.Controls
         {
             IsPalmErasing = true;
             _palmErasePreviousEditingMode = _inkCanvas.EditingMode;
-            _inkCanvas.EraserShape = new RectangleStylusShape(eraserWidthDip, eraserWidthDip);
+            _palmErasePreviousEraserShape = _inkCanvas.EraserShape;
+
+            // 形状优先取宿主注入的工厂（与主画布同口径：圆形擦/黑板擦比例），宿主未注入时
+            // 退化为方形。工厂是宿主代码，异常不能打断触摸处理，这里兜底记录后回退方形。
+            StylusShape palmShape = null;
+            var factory = PalmEraserShapeFactory;
+            if (factory != null)
+            {
+                try
+                {
+                    palmShape = factory(eraserWidthDip);
+                }
+                catch (Exception ex)
+                {
+                    Ink_Canvas.Helpers.LogHelper.WriteLogToFile(
+                        $"独立画布手掌擦形状计算失败: {ex.Message}",
+                        Ink_Canvas.Helpers.LogHelper.LogType.Warning);
+                }
+            }
+
+            _inkCanvas.EraserShape = palmShape ?? new RectangleStylusShape(eraserWidthDip, eraserWidthDip);
             _inkCanvas.EditingMode = InkCanvasEditingMode.EraseByPoint;
         }
 
@@ -411,7 +475,9 @@ namespace Ink_Canvas.Controls
             // 期间宿主可能已经切过工具，而触摸抑制那条路径本来就以宿主下发值为准，
             // 两条路径各自保持自己的语义，互不覆盖。
             _inkCanvas.EditingMode = _palmErasePreviousEditingMode;
-            _inkCanvas.EraserShape = null;
+            if (_palmErasePreviousEraserShape != null)
+                _inkCanvas.EraserShape = _palmErasePreviousEraserShape;
+            _palmErasePreviousEraserShape = null;
         }
 
         private void InkSurface_PreviewTouchDown(object sender, TouchEventArgs e)
@@ -763,6 +829,21 @@ namespace Ink_Canvas.Controls
 
         /// <summary>当前画布内的墨迹集合（复用 Stroke 节点结构）。</summary>
         public StrokeCollection Strokes => _inkCanvas.Strokes;
+
+        /// <summary>
+        /// 内部 InkCanvas 的收笔事件转发（<c>sender</c> 是本控件而不是内层 InkCanvas）。
+        /// <para>
+        /// 存在的目的只有一个：让宿主给「不经过 UI 联动建画布路径」的卫星画布挂接收笔后处理
+        /// 管线（见 <c>MainWindow.AttachIndependentCanvasPostProcessing</c>），从而与主画布、
+        /// UI 联动批注层的线条观感（压感模拟/笔锋/拉直/形状识别/平滑/激光渐隐）保持一致。
+        /// </para>
+        /// <para>
+        /// 约束：<b>每块画布只挂接一条后处理路径</b>。UI 联动批注层目前直接订阅
+        /// <see cref="InkSurface"/> 的 <c>StrokeCollected</c>，因此不要再同时订阅本事件，
+        /// 否则同一笔会被处理两次（形状识别会重复调度、平滑会叠加）。
+        /// </para>
+        /// </summary>
+        public event EventHandler<InkCanvasStrokeCollectedEventArgs> StrokeCollected;
 
         /// <summary>内部 InkCanvas（供上层需要读取/清空墨迹时使用）。</summary>
         public InkCanvas InkSurface => _inkCanvas;
@@ -1236,6 +1317,25 @@ namespace Ink_Canvas.Controls
         public void ResetInkHistory()
         {
             _history.Clear();
+
+            // 载入完成后（宿主在加完历史笔迹之后调用本方法）画布内容即等于「已保存状态」，
+            // 这里顺手清掉累积的脏标记：否则接下来第一次自动保存会把刚载入、没有任何改动的
+            // 墨迹再写一遍盘。
+            _hasUnsavedInk = false;
+        }
+
+        /// <summary>
+        /// 清空渐隐层上残留的临时视觉（换图 / 换文档时调用）。
+        /// <para>
+        /// 激光笔与墨迹渐隐的视觉副本挂在渐隐层上、由宿主共享的 <c>InkFadeManager</c> 驱动，
+        /// 换内容后旧内容的渐隐画面不应该继续盖在新内容上。这里只清视觉，不碰任何笔迹数据；
+        /// 管理器之后对已不在容器里的视觉做移除是幂等的（<see cref="Helpers.InkFadeVisualHost.Remove"/>
+        /// 会先判断容器是否仍包含它），因此不会抛异常。
+        /// </para>
+        /// </summary>
+        public void ClearFadeVisuals()
+        {
+            _fadeLayer.Children.Clear();
         }
 
         /// <summary>
@@ -1259,6 +1359,44 @@ namespace Ink_Canvas.Controls
 
         /// <summary>恢复本画布最近一次被撤销的墨迹操作（不影响主画布）。</summary>
         public void InkHistoryRedo() => _history.Redo();
+
+        /// <summary>
+        /// 自上次 <see cref="MarkInkSaved"/> 以来本画布墨迹是否发生过变化（脏标记）。
+        /// <para>
+        /// 判定依据是本画布的撤销历史，因此书写、擦除、清空、框选移动/缩放、撤销/恢复都会置脏；
+        /// 而滚动同步用的 <c>Stroke.Transform</c> 不会进入历史，单纯滚动文档不会把画布标脏。
+        /// 宿主（UI 联动墨迹自动保存、图片查看器批注落盘）可据此跳过「没有变化」的写盘。
+        /// </para>
+        /// </summary>
+        public bool HasUnsavedInk => _hasUnsavedInk;
+
+        /// <summary>
+        /// 脏标记由「无变化」变为「有变化」时触发一次（持续修改不会重复触发）。
+        /// 供宿主持久化侧做节流刷新；查询当前状态请用 <see cref="HasUnsavedInk"/>。
+        /// </summary>
+        public event EventHandler InkContentChanged;
+
+        /// <summary>标记本画布墨迹已保存（清掉脏标记）。宿主在墨迹成功落盘或载入完成后调用。</summary>
+        public void MarkInkSaved() => _hasUnsavedInk = false;
+
+        /// <summary>
+        /// 在 using 作用域内暂停撤销录制、但保持几何基线同步。
+        /// <para>
+        /// 供宿主的收笔后处理使用：压感归一/触摸压感模拟/实时笔锋是在 <c>StrokeCollected</c> 内
+        /// 同步改写「刚提交的同一笔」的点集，这些改写属于这一笔本身，不该各自占一条撤销记录
+        /// （否则用户要连按几次撤销才能撤掉一笔，与主画布的手感不一致）。
+        /// 与 <c>StrokesChanged</c> 级别的替换（拉直/平滑/形状纠正）无关：那些仍按一次替换
+        /// 记录一步，保持「撤销一次回到替换前」的既有语义。
+        /// </para>
+        /// </summary>
+        internal IDisposable SuspendInkHistoryRecording() => _history.SuppressRecording();
+
+        private void OnInkHistoryChanged()
+        {
+            if (_hasUnsavedInk) return;
+            _hasUnsavedInk = true;
+            InkContentChanged?.Invoke(this, EventArgs.Empty);
+        }
 
         /// <summary>
         /// 用 <paramref name="replacements"/> 替换 <paramref name="removed"/>（如收笔后的平滑/美化），
@@ -1498,12 +1636,24 @@ namespace Ink_Canvas.Controls
             /// <summary>
             /// 笔迹点集变化 = 框选工具在改几何（书写产生的笔迹是「先入集合、后不再变点集」，
             /// 滚动同步走 <c>Transform</c> 不触发本事件）。
+            /// <para>
+            /// 抑制期（<see cref="SuppressRecording"/>）内发生的点集变化不算一次可撤销操作，
+            /// 但必须同步几何基线：那个抑制期正是宿主的收笔后处理在改写同一笔的点集
+            /// （压感归一/笔锋/压感合成），若不推进基线，之后用户框选拖动这条笔迹时
+            /// 「撤销」会把它还原成后处理前的原始点集。
+            /// </para>
             /// </summary>
             private void OnStrokePointsChanged(object sender, EventArgs e)
             {
-                if (_disposed || _applying || _suppressed) return;
+                if (_disposed || _applying) return;
                 if (sender is not Stroke stroke) return;
                 if (!_surface.Strokes.Contains(stroke)) return;
+
+                if (_suppressed)
+                {
+                    _dragBaseline[stroke] = stroke.StylusPoints.Clone();
+                    return;
+                }
 
                 if (!_dragBaseline.TryGetValue(stroke, out var baseline))
                 {

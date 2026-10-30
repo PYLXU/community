@@ -23,6 +23,11 @@ namespace Ink_Canvas.Helpers
     /// <see cref="IndependentCanvas.HostControlsOverlaySuppression"/>（图片查看器自带底栏，
     /// 不接受宿主暂停其浮层）。
     /// </para>
+    /// <para>
+    /// 同步方向是「主画布 → 卫星画布」的<b>单向轮询</b>（宿主 250ms 一拍）。卫星画布自身的
+    /// 瞬时输入状态（多指手势抑制、手掌擦）不会被这一路覆盖：那两项正占用编辑模式与擦头形状，
+    /// 轮询时必须让路，见 <see cref="IndependentCanvas.IsInputSuppressionActive"/>。
+    /// </para>
     /// </summary>
     internal static class IndependentCanvasStateSync
     {
@@ -47,6 +52,13 @@ namespace Ink_Canvas.Helpers
             /// 委托内部读取 <c>canvas.IsPalmErasing</c> 实时状态，因此只需创建一次。
             /// </summary>
             public Func<IndependentCanvas, PalmContactClassifier> PalmClassifierFactory { get; set; }
+
+            /// <summary>
+            /// 手掌擦擦头形状工厂（入参为擦头宽度 DIP）。为 null 时画布退化为方形擦头。
+            /// 宿主按主画布的擦头口径构造（圆形擦 → EllipseStylusShape；黑板擦 → 38:56 矩形），
+            /// 使手掌擦在卫星画布上的擦除范围与主画布一致。
+            /// </summary>
+            public Func<double, StylusShape> PalmEraserShapeFactory { get; set; }
         }
 
         /// <summary>把一次状态快照应用到一块卫星画布。</summary>
@@ -69,8 +81,20 @@ namespace Ink_Canvas.Helpers
             var surface = canvas.InkSurface;
             if (surface == null) return;
 
-            if (surface.EditingMode != context.EffectiveMode)
-                surface.EditingMode = context.EffectiveMode;
+            // 输入抑制（多指手势 / 手掌擦）期间不改写编辑模式与擦头形状：
+            // 这两项此刻被瞬时状态占用（多指抑制临时切 None、手掌擦临时切 EraseByPoint），
+            // 每 250ms 的轮询若照抄主画布状态，就会把抑制/擦除打断 —— 表现为
+            // 「第二根手指落下仍然落墨」或「手掌擦到一半变回画笔、抬掌后残留擦头尺寸」。
+            // 笔属性（颜色/粗细/荧光笔…）只影响下一笔，抑制期间继续同步没有副作用。
+            if (!canvas.IsInputSuppressionActive)
+            {
+                if (surface.EditingMode != context.EffectiveMode)
+                    surface.EditingMode = context.EffectiveMode;
+
+                // 面积擦/线擦在卫星画布上走原生 InkCanvas 擦除，形状必须与主画布一致。
+                if (context.EraserShape != null)
+                    surface.EraserShape = context.EraserShape;
+            }
 
             var attributes = context.Attributes;
             if (attributes != null)
@@ -83,10 +107,6 @@ namespace Ink_Canvas.Helpers
                 if (current == null || !DrawingAttributesEquivalent(current, attributes))
                     surface.DefaultDrawingAttributes = attributes.Clone();
             }
-
-            // 面积擦/线擦在卫星画布上走原生 InkCanvas 擦除，形状必须与主画布一致。
-            if (context.EraserShape != null)
-                surface.EraserShape = context.EraserShape;
         }
 
         /// <summary>命中测试开关、触摸抑制模式、浮层暂停。</summary>
@@ -97,8 +117,9 @@ namespace Ink_Canvas.Helpers
             // 默认：非批注状态下整块画布让出命中测试（鼠标/图形/漫游模式不接收输入）。
             // 例外：图片查看器需要在非批注状态下继续接收鼠标/触摸来平移缩放图片，
             // 由 RequiresInputWhenIdle 声明；此时它靠 EditingMode=None 保证不落墨。
+            // 抑制期间不动命中测试：手势/手掌擦进行中切换 IsHitTestVisible 会打断当前触摸的捕获。
             bool wantHitTestVisible = interactive || canvas.RequiresInputWhenIdle;
-            if (canvas.IsHitTestVisible != wantHitTestVisible)
+            if (!canvas.IsInputSuppressionActive && canvas.IsHitTestVisible != wantHitTestVisible)
                 canvas.IsHitTestVisible = wantHitTestVisible;
 
             // 多指手势结束后恢复到宿主当前的逻辑模式，而不是画布当时的物理模式
@@ -123,6 +144,11 @@ namespace Ink_Canvas.Helpers
         /// <summary>手掌擦：与主画布共用同一套接触面积判定与设置。</summary>
         private static void ApplyPalmEraser(IndependentCanvas canvas, Context context)
         {
+            // 擦头形状与「是否启用手掌判定」无关，先挂上：无论主机是否提供手掌判定策略，
+            // 只要给了形状工厂，画布在真正进入手掌擦时就能用上（只挂一次，避免每拍换委托）。
+            if (context.PalmEraserShapeFactory != null && canvas.PalmEraserShapeFactory == null)
+                canvas.PalmEraserShapeFactory = context.PalmEraserShapeFactory;
+
             var factory = context.PalmClassifierFactory;
             if (factory == null) return;
 

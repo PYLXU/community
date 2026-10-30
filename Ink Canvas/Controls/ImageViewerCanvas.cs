@@ -194,6 +194,17 @@ namespace Ink_Canvas.Controls
                 if (InkSurface.EditingMode != InkCanvasEditingMode.EraseByPoint)
                     HideEraserFootprint();
             };
+
+            // 收笔后处理：与 UI 联动批注层走同一条宿主管线（压感归一/触摸压感模拟/实时笔锋/
+            // 直线拉直/形状识别/墨迹平滑/激光渐隐），因此图片上的批注与主画布、Word 批注的
+            // 线条观感一致，而不是「裸 InkCanvas」的默认行为。
+            // 查看器窗口不是主窗口创建的画布，所以由画布自己在 Loaded 时补挂接入口
+            // （幂等；主窗口尚未就绪时静默跳过，转为可见时会再试一次）。
+            Loaded += (_, _) => MainWindow.AttachSatelliteCanvasPostProcessing(this);
+            IsVisibleChanged += (_, _) =>
+            {
+                if (IsVisible) MainWindow.AttachSatelliteCanvasPostProcessing(this);
+            };
         }
 
         /// <summary>
@@ -289,6 +300,9 @@ namespace Ink_Canvas.Controls
             HideEraserFootprint();
             ClearAllStrokes();
             ResetInkHistory();
+
+            // 旧图上正在渐隐的激光笔迹视觉不能盖到新图上（渐隐层与笔迹同坐标系，也必须归零）。
+            ClearFadeVisuals();
 
             // 基类累积的渐隐层变换与图片自身的变换必须一起归零，否则二者会永久错位。
             ResetInkTransformWithoutMovingStrokes();

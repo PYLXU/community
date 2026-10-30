@@ -1,6 +1,7 @@
 using Ink_Canvas.Helpers;
 using System;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Ink;
@@ -10,11 +11,18 @@ using System.Windows.Threading;
 namespace Ink_Canvas
 {
     /// <summary>
-    /// 独立画布（UI 联动批注层）的收笔后处理适配层。
+    /// 卫星独立画布（UI 联动批注层 + 内置图片查看器画布）的收笔后处理适配层。
     /// <para>
     /// 定位：独立画布的内层是一块裸 <see cref="System.Windows.Controls.InkCanvas"/>，
     /// 它不会经过主画布的 <c>ProcessCommittedStroke</c> 管线。本类只负责把
     /// <b>宿主现成的服务</b>接到独立画布的笔迹集合上，不复制主画布的算法。
+    /// </para>
+    /// <para>
+    /// <b>接入方式</b>：UI 联动批注层在 <c>MW_UILinkage.CreateUILinkageCanvas</c> 里直接订阅
+    /// <c>InkSurface.StrokeCollected</c>；内置图片查看器窗口自己创建画布、主窗口没有建画布时机，
+    /// 因此由画布在 Loaded 时调用 <see cref="AttachSatelliteCanvasPostProcessing"/> 走
+    /// <see cref="Ink_Canvas.Controls.IndependentCanvas.StrokeCollected"/> 转发事件接入
+    /// （幂等，且每块画布只允许一条后处理路径，避免同一笔被处理两次）。
     /// </para>
     /// <para>
     /// <b>已接通的项</b>（入口见 <see cref="IndependentCanvas_StrokeCollected"/>）：
@@ -26,7 +34,7 @@ namespace Ink_Canvas
     /// <item>直线拉直 + 端点吸附 —— 复用主画布同一批判定与几何生成
     /// （<see cref="TryStraightenIndependentStroke"/>，吸附候选只取本画布笔迹）。</item>
     /// <item>形状识别 —— 走抽取出的共享核心 <c>RunInkToShapeCorrectionCoreAsync</c>，
-    /// 每实例一份 <c>InkToShapeTargetContext</c>（缓冲/替换实现都不与主画布共享）。</item>
+    /// 每块画布一份 <c>InkToShapeTargetContext</c>（缓冲/替换实现都不与主画布及其它画布共享）。</item>
     /// <item>墨迹平滑 —— 复用宿主共享的 <see cref="InkSmoothingManager"/>（含
     /// <see cref="InkSmoothingManager.CopyPropertyData"/>，保证激光标记等 property data 不丢）。</item>
     /// <item>墨迹渐隐 / 激光笔 —— 复用同一个 <see cref="InkFadeManager"/>，视觉宿主换成
@@ -45,41 +53,137 @@ namespace Ink_Canvas
     /// WPF 原生墨迹收集，不共享该输入路径。</item>
     /// <item><b>实时（书写中）笔锋</b>：主画布在落笔过程中就按速率改笔尖，
     /// 独立画布依赖 WPF 原生收集、只能在抬笔后一次性应用。</item>
+    /// <item><b>白板页级语义（页面脏时间戳 / 冻结页拦截）</b>：只对 UI 联动批注层启用。
+    /// 内置图片查看器的批注按图片单独持久化、不属于白板页，冻结白板页不应连带禁用它的批注。</item>
     /// </list>
     /// </summary>
     public partial class MainWindow
     {
+        /// <summary>
+        /// 已挂接收笔后处理的卫星画布（弱键）：画布从视觉树移除后条目自动回收，不留强引用。
+        /// </summary>
+        private readonly ConditionalWeakTable<
+            Ink_Canvas.Controls.IndependentCanvas, SatellitePipelineAttachment> _satellitePipelineAttachments
+            = new ConditionalWeakTable<Ink_Canvas.Controls.IndependentCanvas, SatellitePipelineAttachment>();
+
+        /// <summary>仅用于弱表取值的空标记类型（ConditionalWeakTable 的值类型必须是引用类型）。</summary>
+        private sealed class SatellitePipelineAttachment
+        {
+        }
+
+        /// <summary>
+        /// 非 UI 联动画布（内置图片查看器）的「墨迹转形状」上下文（弱键）。
+        /// UI 联动画布仍把上下文挂在 <c>UILinkageCanvasInstance.InkToShapeContext</c> 上，
+        /// 因为换文档时需要就地清缓冲（见 <c>ResetUILinkageInkToShapeBuffer</c>）。
+        /// </summary>
+        private readonly ConditionalWeakTable<
+            Ink_Canvas.Controls.IndependentCanvas, InkToShapeTargetContext> _satelliteInkToShapeContexts
+            = new ConditionalWeakTable<Ink_Canvas.Controls.IndependentCanvas, InkToShapeTargetContext>();
+
+        /// <summary>
+        /// 为任意卫星独立画布挂接收笔后处理（幂等）。
+        /// <para>
+        /// 存在的意义：UI 联动批注层在 <c>MW_UILinkage.CreateUILinkageCanvas</c> 里直接订阅
+        /// <c>InkSurface.StrokeCollected</c>，而内置图片查看器窗口是自己 new 画布的
+        /// （主窗口没有建画布时机），它的批注原本完全不走收笔管线 —— 压感归一/触摸压感模拟/
+        /// 笔锋/直线拉直/形状识别/墨迹平滑/激光渐隐统统缺失，线条观感与主画布、Word 批注不一致。
+        /// 这里用本控件转发的 <see cref="Ink_Canvas.Controls.IndependentCanvas.StrokeCollected"/>
+        /// 补上这条通道。
+        /// </para>
+        /// <para>
+        /// 静态形态只是为了让「控件层」不必持有 MainWindow 实例：内部按
+        /// <c>Application.Current.MainWindow</c> 解析宿主，主窗口尚未就绪时静默跳过
+        /// （画布后续的 Loaded 还会再调用一次）。已挂接过的画布重复调用无副作用。
+        /// </para>
+        /// </summary>
+        internal static void AttachSatelliteCanvasPostProcessing(
+            Ink_Canvas.Controls.IndependentCanvas canvas)
+        {
+            if (canvas == null) return;
+            var mainWindow = Application.Current?.MainWindow as MainWindow ?? FindOpenMainWindow();
+            mainWindow?.AttachIndependentCanvasPostProcessing(canvas);
+        }
+
+        /// <summary>
+        /// 兜底查找已打开的主窗口：<see cref="Application.MainWindow"/> 理论上就是它，但若某个
+        /// 更早创建的窗口抢到了该属性，这里按类型再找一遍，避免图片查看器画布静默失去收笔后处理。
+        /// </summary>
+        private static MainWindow FindOpenMainWindow()
+        {
+            var app = Application.Current;
+            if (app == null) return null;
+            foreach (Window window in app.Windows)
+            {
+                if (window is MainWindow mainWindow) return mainWindow;
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// 实例侧挂接（幂等）：订阅画布转发的收笔事件。
+        /// <para>
+        /// 每块画布只允许一条后处理路径：UI 联动画布走 <c>MW_UILinkage</c> 里的直接订阅，
+        /// 图片查看器画布走这里；两者不要同时接同一块画布，否则同一笔会被后处理两次
+        /// （形状识别重复调度、平滑叠加）。
+        /// </para>
+        /// </summary>
+        internal void AttachIndependentCanvasPostProcessing(
+            Ink_Canvas.Controls.IndependentCanvas canvas)
+        {
+            if (canvas?.InkSurface == null) return;
+            if (_satellitePipelineAttachments.TryGetValue(canvas, out _)) return;
+
+            // UI 联动批注层已经直接订阅了内层 InkSurface.StrokeCollected，再挂一次就会把同一笔
+            // 处理两遍。若将来把那条路径改成统一调用本方法，删掉这个守卫即可（届时转发事件会成为
+            // 唯一入口，两条路径的 sender 语义也统一了）。
+            if (FindUILinkageInstanceByCanvas(canvas) != null) return;
+
+            _satellitePipelineAttachments.Add(canvas, new SatellitePipelineAttachment());
+            canvas.StrokeCollected += IndependentCanvas_StrokeCollected;
+        }
+
         /// <summary>独立画布收笔事件处理：按与主画布一致的开关做压感归一与平滑。</summary>
         private void IndependentCanvas_StrokeCollected(object sender, InkCanvasStrokeCollectedEventArgs e)
         {
             var stroke = e?.Stroke;
             if (stroke == null) return;
 
-            var canvas = sender as Ink_Canvas.Controls.IndependentCanvas;
+            var canvas = ResolveSatelliteCanvasFromSender(sender);
             var surface = canvas?.Strokes;
             if (surface == null || !surface.Contains(stroke)) return;
 
-            // 批注也是「用户在画布上落了墨」。不刷新这个时间戳，延迟自动冻结的判据
-            // （MW_InkFreeze.cs:471 读 pageLastUserInkMutationUtc）就看不到联动书写，
-            // 于是可能在用户正对着 Word 批注时把白板页冻上 —— 紧随其后的那一笔会被
-            // 冻结页拦截并回滚。时间戳按白板页索引，批注不改变页归属，只表示
-            // 「刚刚发生过用户墨迹动作」。
-            MarkCurrentPageInkChanged();
+            // 是否为 UI 联动批注层的画布（有实例）。内置图片查看器画布没有实例：它的批注
+            // 按图片单独持久化、不属于白板页，因此「页面级」语义（白板页脏时间戳、冻结页
+            // 拦截）对它不适用，见下。
+            var inst = FindUILinkageInstanceByCanvas(canvas);
 
-            // 冻结页：交给主画布同一套拦截提示，不在此静默吞掉。
-            if (IsCurrentPageFrozen)
+            if (inst != null)
             {
-                TryBlockFrozenPageMutation("在联动画布上书写");
-                try
+                // 批注也是「用户在画布上落了墨」。不刷新这个时间戳，延迟自动冻结的判据
+                // （MW_InkFreeze.cs:471 读 pageLastUserInkMutationUtc）就看不到联动书写，
+                // 于是可能在用户正对着 Word 批注时把白板页冻上 —— 紧随其后的那一笔会被
+                // 冻结页拦截并回滚。时间戳按白板页索引，批注不改变页归属，只表示
+                // 「刚刚发生过用户墨迹动作」。
+                MarkCurrentPageInkChanged();
+
+                // 冻结页：交给主画布同一套拦截提示，不在此静默吞掉。
+                // 图片查看器画布不做这项拦截：它写的不是白板页内容，冻结白板页不应连带
+                // 禁用另一个窗口里的图片批注。
+                if (IsCurrentPageFrozen)
                 {
-                    if (surface.Contains(stroke)) surface.Remove(stroke);
+                    TryBlockFrozenPageMutation("在联动画布上书写");
+                    try
+                    {
+                        if (surface.Contains(stroke)) surface.Remove(stroke);
+                    }
+                    catch (Exception ex)
+                    {
+                        LogHelper.WriteLogToFile(
+                            $"冻结页回滚联动画布笔迹失败: {ex.Message}", LogHelper.LogType.Warning);
+                    }
+                    return;
                 }
-                catch (Exception ex)
-                {
-                    LogHelper.WriteLogToFile(
-                        $"冻结页回滚联动画布笔迹失败: {ex.Message}", LogHelper.LogType.Warning);
-                }
-                return;
             }
 
             try
@@ -87,33 +191,42 @@ namespace Ink_Canvas
                 // 激光笔 / 墨迹渐隐：与主画布同一分支、同一管理器（InkFadeManager），
                 // 只是把视觉宿主换成独立画布自己的渐隐层。语义与主画布一致：
                 // 渐隐笔迹「根本不进 InkCanvas.Strokes」，因此必须静默移除且不进撤销栈。
-                if (TryFadeIndependentStroke(canvas, stroke))
+                // 渐隐时长按「实际书写时长」计算只对 UI 联动层可用（那里在按下时记了时间戳）；
+                // 图片查看器画布没有这条记录，按 InkFadeManager 的默认动画时长渐隐。
+                if (TryFadeIndependentStroke(canvas, stroke, inst != null))
                     return;
 
-                ApplyIndependentStrokePressurePolicy(stroke);
-                _independentTouchPressureSimulationApplied = false;
-                _independentAbortPostProcess = false;
-                ApplyIndependentStrokePressureSimulation(stroke);
-                // 与主画布管线一致：AbortPipeline 分支后不再做任何后处理。
-                if (_independentAbortPostProcess) return;
-                ApplyIndependentVelocityBrushTip(stroke);
+                // 压感归一 / 触摸压感模拟 / 实时笔锋都在改写「刚提交的同一笔」的点集：
+                // 暂停撤销录制，使这些改写并进笔迹的「新增」记录，而不是各自多出一条撤销
+                // （否则触屏/模拟压感环境下用户要连按几次撤销才能撤掉一笔）。拉直/平滑/形状纠正
+                // 走的是 StrokesChanged 级别的替换，仍在抑制范围之外、各记一步。
+                using (canvas.SuspendInkHistoryRecording())
+                {
+                    ApplyIndependentStrokePressurePolicy(stroke);
+                    _independentTouchPressureSimulationApplied = false;
+                    _independentAbortPostProcess = false;
+                    ApplyIndependentStrokePressureSimulation(stroke);
+                    // 与主画布管线一致：AbortPipeline 分支后不再做任何后处理。
+                    if (_independentAbortPostProcess) return;
+                    ApplyIndependentVelocityBrushTip(stroke);
+                }
 
                 // 直线拉直 + 端点吸附：复用主画布同一批判定与几何生成（见 TryStraightenIndependentStroke）。
                 var wasStraightened = TryStraightenIndependentStroke(canvas, stroke, out stroke);
                 if (stroke == null || !surface.Contains(stroke)) return;
 
                 // 形状识别：与主画布同一条核心（RunInkToShapeCorrectionCoreAsync），
-                // 识别完成后同样要跑一次尾部（压感合成 + 平滑）。
-                var inst = FindUILinkageInstanceByCanvas(canvas);
-                if (inst != null && ShapeRecognitionRouter.ShouldRunShapeRecognition(
+                // 识别完成后同样要跑一次尾部（压感合成 + 平滑）。识别上下文按画布隔离
+                // （见 GetOrCreateSatelliteInkToShapeContext），不会与主画布串写。
+                if (ShapeRecognitionRouter.ShouldRunShapeRecognition(
                         Settings.InkToShape.IsInkToShapeEnabled,
                         ShapeRecognitionRouter.FromSettingsInt(Settings.InkToShape.ShapeRecognitionEngine)))
                 {
-                    ScheduleUILinkageInkToShape(inst, stroke, wasStraightened);
+                    ScheduleSatelliteInkToShape(canvas, stroke, wasStraightened);
                     return;
                 }
 
-                ApplyIndependentPostStrokeTail(surface, stroke, wasStraightened);
+                ApplyIndependentPostStrokeTail(canvas, stroke, wasStraightened);
             }
             catch (Exception ex)
             {
@@ -129,6 +242,35 @@ namespace Ink_Canvas
             foreach (var inst in _uiLinkageInstances)
             {
                 if (inst?.Canvas != null && ReferenceEquals(inst.Canvas, canvas)) return inst;
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// 从收笔事件的 <c>sender</c> 解析所属卫星画布。
+        /// <para>
+        /// 两条接入路径的 sender 语义不同：转发事件（图片查看器画布）的 sender 是
+        /// <see cref="Ink_Canvas.Controls.IndependentCanvas"/> 本身；UI 联动批注层是直接订阅
+        /// 内层 <c>InkSurface.StrokeCollected</c> 的，sender 是内层
+        /// <see cref="System.Windows.Controls.InkCanvas"/>。
+        /// </para>
+        /// <para>
+        /// 早期实现只做 <c>sender as IndependentCanvas</c>，于是 UI 联动批注层这条路径永远
+        /// 解析不到画布而直接返回 —— 表现为压感归一/触摸压感模拟/笔锋/直线拉直/形状识别/
+        /// 墨迹平滑/激光渐隐全部不生效，白板页脏时间戳与冻结页拦截也一并漏掉。
+        /// </para>
+        /// </summary>
+        private Ink_Canvas.Controls.IndependentCanvas ResolveSatelliteCanvasFromSender(object sender)
+        {
+            if (sender is Ink_Canvas.Controls.IndependentCanvas canvas) return canvas;
+            if (sender is not InkCanvas surface) return null;
+
+            foreach (var inst in _uiLinkageInstances)
+            {
+                if (inst?.Canvas?.InkSurface != null
+                    && ReferenceEquals(inst.Canvas.InkSurface, surface))
+                    return inst.Canvas;
             }
 
             return null;
@@ -201,9 +343,10 @@ namespace Ink_Canvas
         /// 独立画布走 WPF 原生墨迹收集，不共享该输入路径。
         /// </para>
         /// </summary>
-        private void ApplyIndependentPostStrokeTail(StrokeCollection surface, Stroke stroke, bool wasStraightened)
+        private void ApplyIndependentPostStrokeTail(
+            Ink_Canvas.Controls.IndependentCanvas canvas, Stroke stroke, bool wasStraightened)
         {
-            if (surface == null || stroke == null || !surface.Contains(stroke)) return;
+            if (canvas?.Strokes == null || stroke == null || !canvas.Strokes.Contains(stroke)) return;
 
             try
             {
@@ -214,11 +357,15 @@ namespace Ink_Canvas
                 if (!Settings.Canvas.DisablePressure && !wasStraightened)
                 {
                     // 与主画布 tail 一致：case 0 且仅 2 点时中止尾部后续处理。
-                    if (TryApplyInkStyleTouchPressure(stroke) == InkStylePressureOutcome.AbortTail) return;
+                    // 这段同样是在改写「这一笔」的点集，与收笔后处理共用「不单独记撤销」的语义。
+                    using (canvas.SuspendInkHistoryRecording())
+                    {
+                        if (TryApplyInkStyleTouchPressure(stroke) == InkStylePressureOutcome.AbortTail) return;
+                    }
                 }
 
                 if (Settings.Canvas.UseAdvancedBezierSmoothing && !wasStraightened)
-                    TrySmoothIndependentStroke(surface, stroke);
+                    TrySmoothIndependentStroke(canvas, stroke);
             }
             catch (Exception ex)
             {
@@ -230,13 +377,12 @@ namespace Ink_Canvas
         /// 异步调度「墨迹转形状」：与主画布一样延后到 <see cref="DispatcherPriority.ApplicationIdle"/>
         /// 执行，避免在 <c>StrokeCollected</c> 内同步等待识别结果造成抬笔卡顿。
         /// </summary>
-        private void ScheduleUILinkageInkToShape(
-            UILinkageCanvasInstance inst, Stroke stroke, bool wasStraightened)
+        private void ScheduleSatelliteInkToShape(
+            Ink_Canvas.Controls.IndependentCanvas canvas, Stroke stroke, bool wasStraightened)
         {
-            var canvas = inst?.Canvas;
             if (canvas == null) return;
 
-            var ctx = GetOrCreateUILinkageInkToShapeContext(inst);
+            var ctx = GetOrCreateSatelliteInkToShapeContext(canvas);
             Dispatcher.BeginInvoke(new Action(async () =>
             {
                 try
@@ -249,8 +395,33 @@ namespace Ink_Canvas
                 }
 
                 // 与主画布一致：形状纠正后仍要跑一次尾部（压感合成 / 平滑）。
-                ApplyIndependentPostStrokeTail(canvas.Strokes, stroke, wasStraightened);
+                ApplyIndependentPostStrokeTail(canvas, stroke, wasStraightened);
             }), DispatcherPriority.ApplicationIdle);
+        }
+
+        /// <summary>
+        /// 取/建某块卫星画布的「墨迹转形状」上下文（按画布隔离，绝不与主画布共享缓冲）。
+        /// <list type="bullet">
+        /// <item>UI 联动画布：挂在 <c>UILinkageCanvasInstance.InkToShapeContext</c> 上，
+        /// 换文档时由 <c>ResetUILinkageInkToShapeBuffer</c> 就地清缓冲；</item>
+        /// <item>其他画布（内置图片查看器）：挂在宿主弱表里，画布被回收后条目自动释放。</item>
+        /// </list>
+        /// </summary>
+        private InkToShapeTargetContext GetOrCreateSatelliteInkToShapeContext(
+            Ink_Canvas.Controls.IndependentCanvas canvas)
+        {
+            if (canvas == null) return null;
+
+            var inst = FindUILinkageInstanceByCanvas(canvas);
+            if (inst != null) return GetOrCreateUILinkageInkToShapeContext(inst);
+
+            if (_satelliteInkToShapeContexts.TryGetValue(canvas, out var existing))
+                return existing;
+
+            var ctx = CreateIndependentInkToShapeContext(canvas);
+            if (ctx == null) return null;
+            _satelliteInkToShapeContexts.Add(canvas, ctx);
+            return ctx;
         }
 
         /// <summary>
@@ -258,10 +429,20 @@ namespace Ink_Canvas
         /// </summary>
         private InkToShapeTargetContext GetOrCreateUILinkageInkToShapeContext(UILinkageCanvasInstance inst)
         {
-            if (inst.InkToShapeContext != null) return inst.InkToShapeContext;
+            if (inst?.Canvas == null) return null;
+            return inst.InkToShapeContext ??= CreateIndependentInkToShapeContext(inst.Canvas);
+        }
 
-            var canvas = inst.Canvas;
-            inst.InkToShapeContext = new InkToShapeTargetContext
+        /// <summary>
+        /// 构造某块卫星独立画布的「墨迹转形状」上下文（UI 联动层与图片查看器共用一份实现）。
+        /// 主画布专属 chrome（矩形参考线 / 选区遮罩）在卫星画布上恒为 null。
+        /// </summary>
+        private static InkToShapeTargetContext CreateIndependentInkToShapeContext(
+            Ink_Canvas.Controls.IndependentCanvas canvas)
+        {
+            if (canvas?.InkSurface == null) return null;
+
+            return new InkToShapeTargetContext
             {
                 Surface = canvas.Strokes,
                 DefaultAttributesProvider = () => canvas.InkSurface?.DefaultDrawingAttributes,
@@ -276,7 +457,6 @@ namespace Ink_Canvas
 
                 CanvasSize = () => canvas.ViewportSize
             };
-            return inst.InkToShapeContext;
         }
 
         /// <summary>
@@ -318,9 +498,14 @@ namespace Ink_Canvas
         /// 激光笔/渐隐分支：复用主画布的 <see cref="InkFadeManager"/>（含激光 PropertyData 标记、
         /// 按落笔时长的动画时长、分段/统一渐隐动画），仅把视觉宿主换成独立画布的渐隐层。
         /// </summary>
+        /// <param name="isUILinkageCanvas">
+        /// 是否为 UI 联动批注层画布。<c>MW_InkActivity</c> 只在 UI 联动层记录「落笔时刻」
+        /// （<c>_uiLinkageInkDownTimestampMs</c>），图片查看器画布没有这条记录，
+        /// 因此那里不能去消费这个可能属于别的画布的时间戳。
+        /// </param>
         /// <returns>true 表示已接管该笔迹（调用方必须立即返回，不得再做后续处理）。</returns>
         private bool TryFadeIndependentStroke(
-            Ink_Canvas.Controls.IndependentCanvas canvas, Stroke stroke)
+            Ink_Canvas.Controls.IndependentCanvas canvas, Stroke stroke, bool isUILinkageCanvas)
         {
             // 与主画布同口径：_inkFadeManager.IsEnabled 只在「激光笔 + 设置开启墨迹渐隐」时为 true，
             // 因此普通笔迹在独立画布上仍会永久保留（不会被误渐隐）。
@@ -339,7 +524,7 @@ namespace Ink_Canvas
                     stroke.AddPropertyData(InkFadeManager.LaserRenderModeGuid, true);
 
                 long strokeDurationMs = 0;
-                if (_uiLinkageInkDownTimestampMs > 0)
+                if (isUILinkageCanvas && _uiLinkageInkDownTimestampMs > 0)
                 {
                     strokeDurationMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - _uiLinkageInkDownTimestampMs;
                     _uiLinkageInkDownTimestampMs = 0;
@@ -416,12 +601,13 @@ namespace Ink_Canvas
 
         /// <summary>
         /// 复用宿主共享的 <see cref="InkSmoothingManager"/> 做高级贝塞尔平滑。
-        /// 平滑器返回新实例时用单次 <c>Strokes.Replace</c> 替换，因此独立画布撤销栈只增加一步。
+        /// 平滑器返回新实例时走 <see cref="Ink_Canvas.Controls.IndependentCanvas.ReplaceStrokes"/> 的
+        /// 单次替换，因此独立画布撤销栈只增加一步 —— 对本画布内撤销/恢复无影响。
         /// </summary>
-        private void TrySmoothIndependentStroke(StrokeCollection surface, Stroke stroke)
+        private void TrySmoothIndependentStroke(Ink_Canvas.Controls.IndependentCanvas canvas, Stroke stroke)
         {
-            if (surface == null || stroke == null) return;
-            if (!surface.Contains(stroke)) return; // 与主画布 tail 一致：笔迹已不在画布上就跳过
+            if (canvas?.Strokes == null || stroke == null) return;
+            if (!canvas.Strokes.Contains(stroke)) return; // 与主画布 tail 一致：笔迹已不在画布上就跳过
             if (!Settings.Canvas.UseAdvancedBezierSmoothing) return;
             if (_inkSmoothingManager == null) return;
 
@@ -431,36 +617,7 @@ namespace Ink_Canvas
             // 平滑器只克隆 DrawingAttributes，会丢激光标记等 property data。
             InkSmoothingManager.CopyPropertyData(stroke, smoothed);
 
-            ReplaceIndependentStrokes(surface, new StrokeCollection { stroke }, new StrokeCollection { smoothed });
-        }
-
-        /// <summary>
-        /// 在指定集合上做「移除 + 新增」的替换。
-        /// 集合属于独立画布时走 <see cref="Ink_Canvas.Controls.IndependentCanvas.ReplaceStrokes"/>，
-        /// 使其撤销栈只记一步。
-        /// </summary>
-        private void ReplaceIndependentStrokes(
-            StrokeCollection surface, StrokeCollection removed, StrokeCollection replacements)
-        {
-            if (surface == null || replacements == null || replacements.Count == 0) return;
-
-            foreach (var inst in _uiLinkageInstances)
-            {
-                if (inst?.Canvas?.Strokes == null || !ReferenceEquals(inst.Canvas.Strokes, surface)) continue;
-                inst.Canvas.ReplaceStrokes(removed, replacements);
-                return;
-            }
-
-            // 未归属任何联动实例（理论上不会发生）：退回集合级替换，保证不丢笔迹。
-            try
-            {
-                if (removed != null && removed.Count > 0) surface.Remove(removed);
-                surface.Add(replacements);
-            }
-            catch (Exception ex)
-            {
-                LogHelper.WriteLogToFile($"联动画布笔迹替换失败: {ex.Message}", LogHelper.LogType.Warning);
-            }
+            canvas.ReplaceStrokes(new StrokeCollection { stroke }, new StrokeCollection { smoothed });
         }
     }
 }
